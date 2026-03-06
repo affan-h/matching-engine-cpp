@@ -78,28 +78,32 @@ Partial fills are supported, and completed trades generate execution events.
 `std::unordered_map` | O(1) lookup for order cancellation |
 `std::vector` | Store execution events |
 
-## Complexity
+## Time Complexity
 
-Insert Order: O(log P)  
-Cancel Order: O(1)  
-Best bid/ask: O(1)
-Matching: O(K)
+| Operation | Complexity |
+|----------|-----------|
+Insert Limit Order | O(log P) |
+Cancel Order | O(1) |
+Best Bid / Ask | O(1) |
+Matching | O(K) |
 
 P = number of price levels  
-K = orders consumed during matching
+K = number of orders consumed during matching
 
 ## Future Improvements
 
-- Replace std::map with a price ladder for faster access
+- Replace `std::map` with a price ladder for faster access
 - Maintain aggregated volume at each price level
 - Separate matching engine from order book
 - Add persistence and market data feeds
 
 ## Example Output
 
+```
 TRADE 5 @ 105  
 TRADE 5 @ 106  
 UNFILLED MARKET 2
+```
 
 ## Simulation Test
 
@@ -126,4 +130,6 @@ BIDS:
 
 ## Performance Benchmark
 
+```
 Processed 100000 orders in 137 ms
+```
