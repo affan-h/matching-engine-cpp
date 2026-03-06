@@ -16,6 +16,7 @@ A C++ implementation of a price–time priority limit order book and matching en
 
 The system is organized into three main layers:
 
+```
 Client / Simulator
         │
         ▼
@@ -34,6 +35,7 @@ Client / Simulator
         ▼
      Matching Engine
  (price-time priority)
+```
 
 ### Exchange Layer
 The `Exchange` class manages multiple symbols and routes incoming orders to the appropriate `OrderBook`.
@@ -67,16 +69,14 @@ Matching follows **price–time priority**:
 
 Partial fills are supported, and completed trades generate execution events.
 
-## Data Structures
+## Core Data Structures
 
-std::map  
-Used to maintain sorted price levels for bids and asks.
-
-std::list  
-Maintains FIFO ordering of orders within each price level.
-
-std::unordered_map  
-Provides O(1) lookup for order cancellation using stored iterators.
+| Structure | Purpose |
+|----------|--------|
+`std::map` | Maintain sorted price levels |
+`std::list` | Preserve FIFO order within a price level |
+`std::unordered_map` | O(1) lookup for order cancellation |
+`std::vector` | Store execution events |
 
 ## Complexity
 
@@ -109,6 +109,7 @@ Example run:
 
 Final Order Book
 
+```
 --- ORDER BOOK ---
 ASKS:
 100 : 16
@@ -121,6 +122,7 @@ BIDS:
 97 : 314
 96 : 529
 95 : 349
+```
 
 ## Performance Benchmark
 
