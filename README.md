@@ -1,6 +1,6 @@
 # Limit Order Book Matching Engine (C++)
 
-This project implements a simplified exchange matching engine using price-time priority.
+A C++ implementation of a price–time priority limit order book and matching engine similar to those used in modern electronic trading systems.
 
 ## Features
 
@@ -12,43 +12,62 @@ This project implements a simplified exchange matching engine using price-time p
 - Multi-symbol exchange layer
 - Execution event generation
 
-## Architecture
+## Architecture Overview
 
-Limit Order Book Matching Engine (C++)
+The system is organized into three main layers:
 
-                 Client / Simulator
-                        │
-                        ▼
-                    Exchange
-        ┌─────────────────────────────┐
-        │ symbol → OrderBook          │
-        │                             │
-        │   AAPL → OrderBook          │
-        │   TSLA → OrderBook          │
-        │   BTCUSD → OrderBook        │
-        └─────────────────────────────┘
-                        │
-                        ▼
-                  OrderBook Engine
-        ┌─────────────────────────────┐
-        │ bids: price → FIFO orders   │
-        │ asks: price → FIFO orders   │
-        │ orderLookup: hash table     │
-        │ execution events            │
-        └─────────────────────────────┘
-                        │
-                        ▼
-                   Matching Engine
-             (price-time priority)
+Client / Simulator
+        │
+        ▼
+     Exchange
+        │
+        ├── symbol → OrderBook
+        │
+        ▼
+    OrderBook Engine
+        │
+        ├── bids: price → FIFO order queue
+        ├── asks: price → FIFO order queue
+        ├── orderLookup: hash table for O(1) cancellation
+        └── execution events
+        │
+        ▼
+     Matching Engine
+ (price-time priority)
 
-## Design Decisions
+### Exchange Layer
+The `Exchange` class manages multiple symbols and routes incoming orders to the appropriate `OrderBook`.
 
-### Price-Time Priority
-Orders are matched using strict price-time priority:
-- Better prices execute first
-- Orders at the same price execute FIFO
+Example:
 
-### Data Structures
+```
+Exchange
+   ├── AAPL → OrderBook
+   ├── TSLA → OrderBook
+   └── BTCUSD → OrderBook
+```
+
+This allows each market to operate independently and enables easy scaling.
+
+### OrderBook
+Each `OrderBook` maintains two sides of the market:
+
+- **Bids** (buy orders) sorted from highest price to lowest
+- **Asks** (sell orders) sorted from lowest price to highest
+
+Orders at the same price level are stored in **FIFO order** to preserve time priority.
+
+### Matching Engine
+Incoming orders are processed sequentially.
+
+Matching follows **price–time priority**:
+
+1. Better prices execute first
+2. Orders at the same price execute in FIFO order
+
+Partial fills are supported, and completed trades generate execution events.
+
+## Data Structures
 
 std::map  
 Used to maintain sorted price levels for bids and asks.
@@ -58,10 +77,6 @@ Maintains FIFO ordering of orders within each price level.
 
 std::unordered_map  
 Provides O(1) lookup for order cancellation using stored iterators.
-
-### Deterministic Matching
-
-The matching engine processes orders sequentially to ensure deterministic execution and fairness.
 
 ## Complexity
 
@@ -75,11 +90,10 @@ K = orders consumed during matching
 
 ## Future Improvements
 
-- Replace `std::map` with price ladder
-- Lock-free order queues
-- Market data feed generation
-- Persistence layer
-- Multi-threaded symbol processing
+- Replace std::map with a price ladder for faster access
+- Maintain aggregated volume at each price level
+- Separate matching engine from order book
+- Add persistence and market data feeds
 
 ## Example Output
 
