@@ -1,0 +1,7 @@
+engine
+simulation
+performance
+*.o
+*.out
+.DS_Store
+.vscode
