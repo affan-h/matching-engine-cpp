@@ -1,135 +1,204 @@
 # Limit Order Book Matching Engine (C++)
 
-A C++ implementation of a price–time priority limit order book and matching engine similar to those used in modern electronic trading systems.
+A production-style C++ implementation of a **price–time priority limit order book and matching engine**, inspired by modern electronic trading systems.
+
+---
 
 ## Features
 
-- Limit orders
-- Market orders
-- Order cancellation
-- Order modification
-- FIFO priority within price levels
-- Multi-symbol exchange layer
-- Execution event generation
+* Limit orders (price-constrained)
+* Market orders (liquidity-taking)
+* Order cancellation (O(1))
+* Order modification (cancel + reinsert)
+* FIFO priority within price levels
+* Multi-symbol support
+* Trade event generation (realistic exchange model)
+* Rigorous simulation test suite
 
-## Architecture Overview
+---
 
-The system is organized into three main layers:
+## Architecture
+
+The system follows a **clean separation of concerns**:
 
 ```
-Client / Simulator
+Client / Simulation
         │
         ▼
-     Exchange
+MatchingEngine  (logic)
         │
         ├── symbol → OrderBook
         │
         ▼
-    OrderBook Engine
+OrderBook       (storage)
         │
-        ├── bids: price → FIFO order queue
-        ├── asks: price → FIFO order queue
-        ├── orderLookup: hash table for O(1) cancellation
-        └── execution events
+        ├── bids (map, descending)
+        ├── asks (map, ascending)
+        └── orderLookup (O(1) cancellation)
         │
         ▼
-     Matching Engine
- (price-time priority)
+PriceLevel
+        │
+        ▼
+FIFO list<Order>
 ```
 
-### Exchange Layer
-The `Exchange` class manages multiple symbols and routes incoming orders to the appropriate `OrderBook`.
+---
 
-Example:
+## Core Design Principles
+
+### 1. Separation of Concerns
 
 ```
-Exchange
-   ├── AAPL → OrderBook
-   ├── TSLA → OrderBook
-   └── BTCUSD → OrderBook
+MatchingEngine = logic
+OrderBook      = data structure
 ```
 
-This allows each market to operate independently and enables easy scaling.
+This mirrors real exchange systems.
 
-### OrderBook
-Each `OrderBook` maintains two sides of the market:
+---
 
-- **Bids** (buy orders) sorted from highest price to lowest
-- **Asks** (sell orders) sorted from lowest price to highest
+### 2. Price–Time Priority
 
-Orders at the same price level are stored in **FIFO order** to preserve time priority.
+Matching follows:
 
-### Matching Engine
-Incoming orders are processed sequentially.
+1. Better price first
+2. FIFO within same price
 
-Matching follows **price–time priority**:
+---
 
-1. Better prices execute first
-2. Orders at the same price execute in FIFO order
+### 3. Trade Execution Rule
 
-Partial fills are supported, and completed trades generate execution events.
+```
+Trade price = resting order price
+```
+
+---
 
 ## Core Data Structures
 
-| Structure | Purpose |
-|----------|--------|
-`std::map` | Maintain sorted price levels |
-`std::list` | Preserve FIFO order within a price level |
-`std::unordered_map` | O(1) lookup for order cancellation |
-`std::vector` | Store execution events |
+| Structure            | Purpose             |
+| -------------------- | ------------------- |
+| `std::map`           | Sorted price levels |
+| `std::list`          | FIFO order queue    |
+| `std::unordered_map` | O(1) order lookup   |
+| `Trade struct`       | Execution events    |
+
+---
 
 ## Time Complexity
 
-| Operation | Complexity |
-|----------|-----------|
-Insert Limit Order | O(log P) |
-Cancel Order | O(1) |
-Best Bid / Ask | O(1) |
-Matching | O(K) |
+| Operation      | Complexity |
+| -------------- | ---------- |
+| Insert Order   | O(log P)   |
+| Cancel Order   | O(1)       |
+| Best Bid / Ask | O(1)       |
+| Matching       | O(K)       |
 
-P = number of price levels  
-K = number of orders consumed during matching
+P = number of price levels
+K = number of matches
+
+---
+
+## Order Lifecycle
+
+```
+Receive order
+   ↓
+Match against book
+   ↓
+Generate trade events
+   ↓
+Insert remaining quantity (if any)
+```
+
+---
+
+## Trade Event Model
+
+Each match generates:
+
+```
+TRADE <symbol>
+  TID=<tradeId>
+  TIME=<timestamp>
+  BUY=<buyOrderId>
+  SELL=<sellOrderId>
+  QTY=<quantity>
+  PRICE=<price>
+```
+
+---
+
+## Simulation Tests
+
+The project includes a structured test suite:
+
+* Basic matching
+* Partial fills
+* Multi-level matching
+* Market order execution
+* Cancel validation
+* Modify validation
+* Stress testing
+
+---
+
+## Key Insights
+
+* Order modification **loses time priority** (real exchange behavior)
+* Market orders consume liquidity until exhaustion
+* Iterator-based design enables **O(1) cancellation**
+* Test isolation is critical to avoid hidden bugs
+
+---
+
+## Challenges Solved
+
+* Fixed incorrect modifyOrder side handling
+* Eliminated shared state across tests
+* Unified limit and market order processing
+* Corrected trade timestamp generation
+* Resolved order ID collisions
+
+---
 
 ## Future Improvements
 
-- Replace `std::map` with a price ladder for faster access
-- Maintain aggregated volume at each price level
-- Separate matching engine from order book
-- Add persistence and market data feeds
+* O(1) price ladder (replace `std::map`)
+* Cache-friendly data structures
+* Event-driven architecture (market data + risk engine)
+* Memory pool for ultra-low latency
+* Multi-threaded matching pipeline
+
+---
+
+## Current Status
+
+✔ Correct matching engine
+✔ Realistic trade event system
+✔ Strong architectural design
+✔ Interview-ready project
+
+---
 
 ## Example Output
 
 ```
-TRADE 5 @ 105  
-TRADE 5 @ 106  
-UNFILLED MARKET 2
+TRADE AAPL TID=1 TIME=3 BUY=1 SELL=2 QTY=30 PRICE=100
+TRADE AAPL TID=2 TIME=5 BUY=7 SELL=6 QTY=30 PRICE=103
 ```
 
-## Simulation Test
+---
 
-A random order generator simulates market activity.
+## Learning Outcomes
 
-Example run:
+This project demonstrates:
 
-Final Order Book
+* System design for trading systems
+* Efficient data structure usage
+* Event-driven thinking
+* Debugging complex stateful systems
+* Performance-aware programming in C++
 
-```
---- ORDER BOOK ---
-ASKS:
-100 : 16
-103 : 92
-104 : 310
-105 : 378
-BIDS:
-99 : 9
-98 : 13
-97 : 314
-96 : 529
-95 : 349
-```
-
-## Performance Benchmark
-
-```
-Processed 100000 orders in 137 ms
-```
+---
