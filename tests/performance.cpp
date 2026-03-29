@@ -1,12 +1,12 @@
 #include <iostream>
 #include <chrono>
-#include "exchange.h"
+#include "matching_engine.h"
 
 using namespace std;
 
 int main() {
 
-    Exchange ex;
+    MatchingEngine ex;
 
     int N = 100000;
 
@@ -14,7 +14,7 @@ int main() {
 
     for(int i=0;i<N;i++)
     {
-        ex.addLimitOrder("AAPL", i, true, 100 + (i % 5), 10);
+        ex.addLimitOrder("AAPL", i, Side::Buy, 100 + (i % 5), 10);
     }
 
     auto end = chrono::high_resolution_clock::now();
@@ -26,3 +26,5 @@ int main() {
 
     return 0;
 }
+
+//Processed 100000 orders in 121 ms

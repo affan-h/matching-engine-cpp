@@ -5,35 +5,43 @@
 #include <unordered_map>
 #include <vector>
 #include "types.h"
-
-using namespace std;
+#include "price_level.h"
 
 class OrderBook {
 private:
     // Bids: highest price first
-    std::map<int, std::list<Order>, std::greater<int>> bids;
+    std::map<Price, PriceLevel, std::greater<Price>> bids;
 
     // Asks: lowest price first
-    std::map<int, std::list<Order>> asks;
+    std::map<Price, PriceLevel> asks;
 
-    // Order lookup: id -> (isBuy, iterator)
-    std::unordered_map<int, std::pair<bool, std::list<Order>::iterator>> orderLookup;
+    // Order lookup: id -> iterator
+    std::unordered_map<OrderId, std::list<Order>::iterator> orderLookup;
 
-    std::vector<ExecutionEvent> events;
-    void match(Order& incoming, bool isMarket);
+    // std::vector<ExecutionEvent> events;
 
 public:
-    void addLimitOrder(int id, bool isBuy, int price, int quantity);
-    void cancelOrder(int id);
-    void printBook() const;
-    
-    void addMarketOrder(bool isBuy, int quantity);
-    void modifyOrder(int id, int newPrice, int newQuantity);
+    // Book state
+    bool hasBids() const;
+    bool hasAsks() const;
 
     int getBestBid() const;
     int getBestAsk() const;
 
-    const std::vector<ExecutionEvent>& getEvents() const;
-    void printTrades() const;
-    void clearEvents();
+    Order& getBestBidOrder();
+    Order& getBestAskOrder();
+
+    // Insert operations
+    void insertBid(const Order& order);
+    void insertAsk(const Order& order);
+
+    // Remove best order (after fill)
+    void removeBestBid();
+    void removeBestAsk();
+
+    // Order management
+    bool cancelOrder(OrderId orderId);
+    bool getOrder(OrderId id, Order& outOrder);
+
+    void printBook() const;
 };

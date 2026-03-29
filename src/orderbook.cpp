@@ -3,208 +3,180 @@
 
 using namespace std;
 
-void OrderBook::match(Order& incoming, bool isMarket) {
-
-    if (incoming.isBuy) {
-
-        while (!asks.empty() && incoming.quantity > 0) {
-
-            auto bestAskIt = asks.begin();
-            int bestAskPrice = bestAskIt->first;
-
-            // For limit orders, enforce price condition
-            if (!isMarket && bestAskPrice > incoming.price)
-                break;
-
-            auto& orderList = bestAskIt->second;
-
-            while (!orderList.empty() && incoming.quantity > 0) {
-
-                Order& resting = orderList.front();
-                int tradedQty = min(incoming.quantity, resting.quantity);
-
-                events.emplace_back(EventType::TRADE, bestAskPrice, tradedQty);
-
-                incoming.quantity -= tradedQty;
-                resting.quantity -= tradedQty;
-
-                if (resting.quantity == 0) {
-                    orderLookup.erase(resting.id);
-                    orderList.pop_front();
-                }
-            }
-
-            if (orderList.empty()) {
-                asks.erase(bestAskIt);
-            }
-        }
-
-    } else {  // SELL SIDE
-
-        while (!bids.empty() && incoming.quantity > 0) {
-
-            auto bestBidIt = bids.begin();
-            int bestBidPrice = bestBidIt->first;
-
-            if (!isMarket && bestBidPrice < incoming.price)
-                break;
-
-            auto& orderList = bestBidIt->second;
-
-            while (!orderList.empty() && incoming.quantity > 0) {
-
-                Order& resting = orderList.front();
-                int tradedQty = min(incoming.quantity, resting.quantity);
-
-                events.emplace_back(EventType::TRADE, bestBidPrice, tradedQty);
-
-                incoming.quantity -= tradedQty;
-                resting.quantity -= tradedQty;
-
-                if (resting.quantity == 0) {
-                    orderLookup.erase(resting.id);
-                    orderList.pop_front();
-                }
-            }
-
-            if (orderList.empty()) {
-                bids.erase(bestBidIt);
-            }
-        }
-    }
+bool OrderBook::hasBids() const
+{
+    return !bids.empty();
 }
 
-void OrderBook::addLimitOrder(int id, bool isBuy, int price, int quantity) {
-
-    if (orderLookup.count(id)) {
-        cout << "Order ID already exists.\n";
-        return;
-    }
-
-    Order incoming(id, isBuy, price, quantity);
-
-    // Try matching first
-    match(incoming, false);
-
-    // If still has quantity, insert into book
-    if (incoming.quantity > 0) {
-
-        if (isBuy) {
-            bids[price].push_back(incoming);
-            auto it = prev(bids[price].end());
-            orderLookup[id] = {true, it};
-        } else {
-            asks[price].push_back(incoming);
-            auto it = prev(asks[price].end());
-            orderLookup[id] = {false, it};
-        }
-    }
+bool OrderBook::hasAsks() const
+{
+    return !asks.empty();
 }
 
-void OrderBook::cancelOrder(int id) {
-    if (!orderLookup.count(id)) {
-        cout << "Order not found.\n";
-        return;
-    }
-
-    auto [isBuy, it] = orderLookup[id];
-
-    if (isBuy) {
-        int price = it->price;
-        bids[price].erase(it);
-
-        if (bids[price].empty()) {
-            bids.erase(price);
-        }
-    } else {
-        int price = it->price;
-        asks[price].erase(it);
-
-        if (asks[price].empty()) {
-            asks.erase(price);
-        }
-    }
-
-    orderLookup.erase(id);
-}
-
-void OrderBook::printBook() const {
-    cout << "\n--- ORDER BOOK ---\n";
-
-    cout << "ASKS:\n";
-    for (const auto& [price, orders] : asks) {
-        int totalQty = 0;
-        for (const auto& order : orders)
-            totalQty += order.quantity;
-
-        cout << price << " : " << totalQty << "\n";
-    }
-
-    cout << "BIDS:\n";
-    for (const auto& [price, orders] : bids) {
-        int totalQty = 0;
-        for (const auto& order : orders)
-            totalQty += order.quantity;
-
-        cout << price << " : " << totalQty << "\n";
-    }
-}
-
-void OrderBook::addMarketOrder(bool isBuy, int quantity) {
-
-    Order incoming(-1, isBuy, 0, quantity);
-
-    match(incoming, true);
-
-    if (incoming.quantity > 0) {
-        events.emplace_back(EventType::UNFILLED_MARKET, 0, incoming.quantity);
-    }
-}
-
-void OrderBook::modifyOrder(int id, int newPrice, int newQuantity) {
-
-    if (!orderLookup.count(id)) {
-        cout << "Order not found.\n";
-        return;
-    }
-
-    bool isBuy = orderLookup[id].first;
-
-    cancelOrder(id);
-
-    addLimitOrder(id, isBuy, newPrice, newQuantity);
-}
-
-int OrderBook::getBestBid() const {
-    if (bids.empty())
-        return -1;  // no bid
+Price OrderBook::getBestBid() const
+{
     return bids.begin()->first;
 }
 
-int OrderBook::getBestAsk() const {
-    if (asks.empty())
-        return -1;  // no ask
+Price OrderBook::getBestAsk() const
+{
     return asks.begin()->first;
 }
 
-const vector<ExecutionEvent>& OrderBook::getEvents() const {
-    return events;
+Order& OrderBook::getBestBidOrder()
+{
+    return bids.begin()->second.orders.front();
 }
 
-void OrderBook::printTrades() const {
+Order& OrderBook::getBestAskOrder()
+{
+    return asks.begin()->second.orders.front();
+}
 
-    cout << "\nExecution Events:\n";
+void OrderBook::insertBid(const Order& order)
+{
+    auto it = bids.find(order.price);
 
-    for (const auto& e : events) {
+    if (it == bids.end())
+    {
+        it = bids.emplace(order.price, PriceLevel(order.price)).first;
+    }
 
-        if (e.type == EventType::TRADE)
-            cout << "TRADE: " << e.quantity << " @ " << e.price << "\n";
+    it->second.orders.push_back(order);
 
-        else if (e.type == EventType::UNFILLED_MARKET)
-            cout << "UNFILLED MARKET QTY: " << e.quantity << "\n";
+    auto orderIt = std::prev(it->second.orders.end());
+
+    it->second.totalVolume += order.quantity;
+
+    orderLookup[order.id] = orderIt;
+}
+
+void OrderBook::insertAsk(const Order& order)
+{
+    auto it = asks.find(order.price);
+
+    if (it == asks.end())
+    {
+        it = asks.emplace(order.price, PriceLevel(order.price)).first;
+    }
+
+    it->second.orders.push_back(order);
+
+    auto orderIt = std::prev(it->second.orders.end());
+
+    it->second.totalVolume += order.quantity;
+
+    orderLookup[order.id] = orderIt;
+}
+
+void OrderBook::removeBestBid()
+{
+    auto levelIt = bids.begin();
+
+    auto &level = levelIt->second;
+
+    auto orderIt = level.orders.begin();
+
+    level.totalVolume -= orderIt->quantity;
+
+    orderLookup.erase(orderIt->id);
+
+    level.orders.pop_front();
+
+    if (level.orders.empty())
+    {
+        bids.erase(levelIt);
     }
 }
 
-void OrderBook::clearEvents() {
-    events.clear();
+void OrderBook::removeBestAsk()
+{
+    auto levelIt = asks.begin();
+
+    auto &level = levelIt->second;
+
+    auto orderIt = level.orders.begin();
+
+    level.totalVolume -= orderIt->quantity;
+
+    orderLookup.erase(orderIt->id);
+
+    level.orders.pop_front();
+
+    if (level.orders.empty())
+    {
+        asks.erase(levelIt);
+    }
+}
+
+bool OrderBook::cancelOrder(OrderId id)
+{
+    auto lookupIt = orderLookup.find(id);
+
+    if (lookupIt == orderLookup.end())
+        return false;
+
+    auto orderIt = lookupIt->second;
+
+    const Order &order = *orderIt;
+
+    if (order.side == Side::Buy)
+    {
+        auto levelIt = bids.find(order.price);
+
+        auto &level = levelIt->second;
+
+        level.totalVolume -= order.quantity;
+
+        level.orders.erase(orderIt);
+
+        if (level.orders.empty())
+            bids.erase(levelIt);
+    }
+    else
+    {
+        auto levelIt = asks.find(order.price);
+
+        auto &level = levelIt->second;
+
+        level.totalVolume -= order.quantity;
+
+        level.orders.erase(orderIt);
+
+        if (level.orders.empty())
+            asks.erase(levelIt);
+    }
+
+    orderLookup.erase(lookupIt);
+
+    return true;
+}
+
+bool OrderBook::getOrder(OrderId id, Order& outOrder)
+{
+    auto it = orderLookup.find(id);
+    if (it == orderLookup.end())
+        return false;
+
+    outOrder = *(it->second);
+    return true;
+}
+
+void OrderBook::printBook() const
+{
+    std::cout << "\n----- ORDER BOOK -----\n";
+
+    std::cout << "\nASKS:\n";
+    for (const auto& [price, level] : asks)
+    {
+        std::cout << price << " : " << level.totalVolume << "\n";
+    }
+
+    std::cout << "\nBIDS:\n";
+    for (const auto& [price, level] : bids)
+    {
+        std::cout << price << " : " << level.totalVolume << "\n";
+    }
+
+    std::cout << "----------------------\n";
 }
