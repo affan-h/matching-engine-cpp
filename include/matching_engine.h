@@ -10,21 +10,20 @@ private:
 
     std::unordered_map<std::string, OrderBook> books;
 
-    Timestamp currentTimestamp = 0;
+    //Timestamp currentTimestamp = 0;
     OrderId nextOrderId = 100000;
     uint64_t nextTradeId = 0;
 
 public:
 
-    void addLimitOrder(
+    OrderId addLimitOrder(
         const std::string& symbol,
-        OrderId id,
         Side side,
         Price price,
         Quantity qty
     );
 
-    void addMarketOrder(
+    OrderId addMarketOrder(
         const std::string& symbol,
         Side side,
         Quantity qty
@@ -35,7 +34,7 @@ public:
         OrderId id
     );
 
-    void modifyOrder(
+    bool modifyOrder(
         const std::string& symbol,
         OrderId id,
         Price newPrice,
@@ -51,7 +50,9 @@ public:
         Quantity qty
     );
 
-    void reportTrade(const Trade& trade);
+    void logTrade(const Trade& trade);
+
+    //void reportTrade(const Trade& trade);
 
     OrderId generateOrderId();
 };

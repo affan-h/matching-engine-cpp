@@ -3,152 +3,182 @@
 
 using namespace std;
 
+OrderBook::OrderBook()
+{
+    bidLevels.resize(MAX_PRICE + 1, PriceLevel(0));
+    askLevels.resize(MAX_PRICE + 1, PriceLevel(0));
+
+    bestBid = -1;
+    bestAsk = MAX_PRICE + 1;
+}
+
 bool OrderBook::hasBids() const
 {
-    return !bids.empty();
+    return bestBid != -1;
 }
 
 bool OrderBook::hasAsks() const
 {
-    return !asks.empty();
+    return bestAsk <= MAX_PRICE;
 }
 
 Price OrderBook::getBestBid() const
 {
-    return bids.begin()->first;
+    return bestBid;
 }
 
 Price OrderBook::getBestAsk() const
 {
-    return asks.begin()->first;
+    return bestAsk;
 }
 
 Order& OrderBook::getBestBidOrder()
 {
-    return bids.begin()->second.orders.front();
+    return bidLevels[bestBid].orders.front();
 }
 
 Order& OrderBook::getBestAskOrder()
 {
-    return asks.begin()->second.orders.front();
+    return askLevels[bestAsk].orders.front();
 }
 
 void OrderBook::insertBid(const Order& order)
 {
-    auto it = bids.find(order.price);
+    auto& level = bidLevels[order.price];
 
-    if (it == bids.end())
-    {
-        it = bids.emplace(order.price, PriceLevel(order.price)).first;
-    }
+    if (level.price == 0)
+        level.price = order.price;
 
-    it->second.orders.push_back(order);
+    level.orders.push_back(order);
+    auto it = prev(level.orders.end());
 
-    auto orderIt = std::prev(it->second.orders.end());
+    level.totalVolume += order.quantity;
+    orderLookup[order.id] = it;
 
-    it->second.totalVolume += order.quantity;
+    // mark active
+    bidBitmap.set(order.price);
 
-    orderLookup[order.id] = orderIt;
+    if (order.price > bestBid)
+        bestBid = order.price;
 }
 
 void OrderBook::insertAsk(const Order& order)
 {
-    auto it = asks.find(order.price);
+    auto& level = askLevels[order.price];
 
-    if (it == asks.end())
-    {
-        it = asks.emplace(order.price, PriceLevel(order.price)).first;
-    }
+    if (level.price == 0)
+        level.price = order.price;
 
-    it->second.orders.push_back(order);
+    level.orders.push_back(order);
+    auto it = prev(level.orders.end());
 
-    auto orderIt = std::prev(it->second.orders.end());
+    level.totalVolume += order.quantity;
+    orderLookup[order.id] = it;
 
-    it->second.totalVolume += order.quantity;
+    // mark active
+    askBitmap.set(order.price);
 
-    orderLookup[order.id] = orderIt;
+    if (order.price < bestAsk)
+        bestAsk = order.price;
 }
 
 void OrderBook::removeBestBid()
 {
-    auto levelIt = bids.begin();
+    auto& level = bidLevels[bestBid];
 
-    auto &level = levelIt->second;
+    auto it = level.orders.begin();
 
-    auto orderIt = level.orders.begin();
-
-    level.totalVolume -= orderIt->quantity;
-
-    orderLookup.erase(orderIt->id);
-
+    level.totalVolume -= it->quantity;
+    orderLookup.erase(it->id);
     level.orders.pop_front();
 
     if (level.orders.empty())
     {
-        bids.erase(levelIt);
+        bidBitmap.reset(bestBid);
+
+        // find next best bid
+        int p = bestBid - 1;
+        while (p >= 0 && !bidBitmap.test(p))
+            --p;
+
+        bestBid = p;
     }
 }
 
 void OrderBook::removeBestAsk()
 {
-    auto levelIt = asks.begin();
+    auto& level = askLevels[bestAsk];
 
-    auto &level = levelIt->second;
+    auto it = level.orders.begin();
 
-    auto orderIt = level.orders.begin();
-
-    level.totalVolume -= orderIt->quantity;
-
-    orderLookup.erase(orderIt->id);
-
+    level.totalVolume -= it->quantity;
+    orderLookup.erase(it->id);
     level.orders.pop_front();
 
     if (level.orders.empty())
     {
-        asks.erase(levelIt);
+        askBitmap.reset(bestAsk);
+
+        //find next best ask
+        int p = bestAsk + 1;
+        while (p <= MAX_PRICE && !askBitmap.test(p))
+            ++p;
+
+        bestAsk = p;
     }
 }
 
 bool OrderBook::cancelOrder(OrderId id)
 {
     auto lookupIt = orderLookup.find(id);
-
     if (lookupIt == orderLookup.end())
         return false;
 
     auto orderIt = lookupIt->second;
-
-    const Order &order = *orderIt;
+    Order order = *orderIt;
 
     if (order.side == Side::Buy)
     {
-        auto levelIt = bids.find(order.price);
-
-        auto &level = levelIt->second;
+        auto& level = bidLevels[order.price];
 
         level.totalVolume -= order.quantity;
-
         level.orders.erase(orderIt);
 
         if (level.orders.empty())
-            bids.erase(levelIt);
+        {
+            bidBitmap.reset(order.price);
+
+            if (order.price == bestBid)
+            {
+                int p = bestBid - 1;
+                while (p >= 0 && !bidBitmap.test(p))
+                    --p;
+                bestBid = p;
+            }
+        }
     }
     else
     {
-        auto levelIt = asks.find(order.price);
-
-        auto &level = levelIt->second;
+        auto& level = askLevels[order.price];
 
         level.totalVolume -= order.quantity;
-
         level.orders.erase(orderIt);
 
         if (level.orders.empty())
-            asks.erase(levelIt);
+        {
+            askBitmap.reset(order.price);
+
+            if (order.price == bestAsk)
+            {
+                int p = bestAsk + 1;
+                while (p <= MAX_PRICE && !askBitmap.test(p))
+                    ++p;
+                bestAsk = p;
+            }
+        }
     }
 
     orderLookup.erase(lookupIt);
-
     return true;
 }
 
@@ -167,15 +197,21 @@ void OrderBook::printBook() const
     std::cout << "\n----- ORDER BOOK -----\n";
 
     std::cout << "\nASKS:\n";
-    for (const auto& [price, level] : asks)
+    for (int p = bestAsk; p <= MAX_PRICE; ++p)
     {
-        std::cout << price << " : " << level.totalVolume << "\n";
+        if (!askLevels[p].orders.empty())
+        {
+            std::cout << p << " : " << askLevels[p].totalVolume << "\n";
+        }
     }
 
     std::cout << "\nBIDS:\n";
-    for (const auto& [price, level] : bids)
+    for (int p = bestBid; p >= 0; --p)
     {
-        std::cout << price << " : " << level.totalVolume << "\n";
+        if (!bidLevels[p].orders.empty())
+        {
+            std::cout << p << " : " << bidLevels[p].totalVolume << "\n";
+        }
     }
 
     std::cout << "----------------------\n";

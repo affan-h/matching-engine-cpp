@@ -4,23 +4,28 @@
 #include <list>
 #include <unordered_map>
 #include <vector>
+#include <bitset>
 #include "types.h"
 #include "price_level.h"
 
 class OrderBook {
 private:
-    // Bids: highest price first
-    std::map<Price, PriceLevel, std::greater<Price>> bids;
+    static const int MAX_PRICE = 100000;
 
-    // Asks: lowest price first
-    std::map<Price, PriceLevel> asks;
+    std::vector<PriceLevel> bidLevels;
+    std::vector<PriceLevel> askLevels;
 
-    // Order lookup: id -> iterator
+    std::bitset<MAX_PRICE + 1> bidBitmap;
+    std::bitset<MAX_PRICE + 1> askBitmap;
+    
+    int bestBid;
+    int bestAsk;
+
     std::unordered_map<OrderId, std::list<Order>::iterator> orderLookup;
 
-    // std::vector<ExecutionEvent> events;
-
 public:
+    OrderBook();
+
     // Book state
     bool hasBids() const;
     bool hasAsks() const;
