@@ -8,7 +8,8 @@ struct PriceLevel
     Price price;
     Quantity totalVolume;
 
-    std::list<Order> orders;
+    Order* head = nullptr;
+    Order* tail = nullptr;
 
     PriceLevel(Price p)
         : price(p), totalVolume(0)

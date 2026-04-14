@@ -25,6 +25,9 @@ struct Order
     Quantity quantity;
 
     Timestamp timestamp;
+
+    Order* prev = nullptr;
+    Order* next = nullptr;
 };
 
 struct Trade

@@ -2,26 +2,32 @@
 
 #include <map>
 #include <list>
-#include <unordered_map>
 #include <vector>
-#include <bitset>
+#include <cstdint>
 #include "types.h"
 #include "price_level.h"
+#include "order_pool.h"
 
 class OrderBook {
 private:
     static const int MAX_PRICE = 100000;
+    static const int WORD_SIZE = 64;
 
     std::vector<PriceLevel> bidLevels;
     std::vector<PriceLevel> askLevels;
 
-    std::bitset<MAX_PRICE + 1> bidBitmap;
-    std::bitset<MAX_PRICE + 1> askBitmap;
-    
-    int bestBid;
-    int bestAsk;
+    std::vector<uint64_t> bidBitmap;
+    std::vector<uint64_t> askBitmap;
 
-    std::unordered_map<OrderId, std::list<Order>::iterator> orderLookup;
+    std::vector<Order*> orderLookup;    
+    inline void setBit(std::vector<uint64_t>& bitmap, int price);
+    inline void clearBit(std::vector<uint64_t>& bitmap, int price);
+    inline bool testBit(const std::vector<uint64_t>& bitmap, int price) const;
+
+    inline int findNextAsk(int fromPrice) const;
+    inline int findNextBid(int fromPrice) const;
+
+    OrderPool pool;
 
 public:
     OrderBook();
@@ -30,8 +36,8 @@ public:
     bool hasBids() const;
     bool hasAsks() const;
 
-    int getBestBid() const;
-    int getBestAsk() const;
+    Price getBestBid() const;
+    Price getBestAsk() const;
 
     Order& getBestBidOrder();
     Order& getBestAskOrder();
@@ -47,6 +53,9 @@ public:
     // Order management
     bool cancelOrder(OrderId orderId);
     bool getOrder(OrderId id, Order& outOrder);
+
+    void reduceBidVolume(Price price, Quantity qty);
+    void reduceAskVolume(Price price, Quantity qty);
 
     void printBook() const;
 };

@@ -1,22 +1,35 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -Iinclude -Wall
+CXXFLAGS = -O3 -march=native -std=c++17 -Iinclude -Wall -Wextra -DNDEBUG
 
-ENGINE_SRC = src/main.cpp src/matching_engine.cpp src/orderbook.cpp
-CORE_SRC   = src/matching_engine.cpp src/orderbook.cpp
+SRC_DIR = src
+TEST_DIR = tests
 
-all: engine
+ENGINE_SRC = $(SRC_DIR)/main.cpp $(SRC_DIR)/matching_engine.cpp $(SRC_DIR)/orderbook.cpp
+CORE_SRC   = $(SRC_DIR)/matching_engine.cpp $(SRC_DIR)/orderbook.cpp
 
-engine:
-	$(CXX) $(CXXFLAGS) $(ENGINE_SRC) -o engine
+ENGINE_TARGET = engine
+SIM_TARGET = simulation
+BENCH_TARGET = benchmark
 
-simulation:
-	$(CXX) $(CXXFLAGS) tests/simulation.cpp $(CORE_SRC) -o simulation
+all: $(ENGINE_TARGET)
 
-performance:
-	$(CXX) $(CXXFLAGS) tests/performance.cpp $(CORE_SRC) -o performance
+$(ENGINE_TARGET):
+	$(CXX) $(CXXFLAGS) $(ENGINE_SRC) -o $(ENGINE_TARGET)
 
-run: engine
-	./engine $(ARGS)
+$(SIM_TARGET):
+	$(CXX) $(CXXFLAGS) $(TEST_DIR)/simulation.cpp $(CORE_SRC) -o $(SIM_TARGET)
+
+$(BENCH_TARGET):
+	$(CXX) $(CXXFLAGS) $(TEST_DIR)/benchmark.cpp $(CORE_SRC) -o $(BENCH_TARGET)
+
+run: $(ENGINE_TARGET)
+	./$(ENGINE_TARGET) $(ARGS)
+
+sim: $(SIM_TARGET)
+	./$(SIM_TARGET)
+
+bench: $(BENCH_TARGET)
+	./$(BENCH_TARGET)
 
 clean:
-	rm -f engine simulation performance
+	rm -f $(ENGINE_TARGET) $(SIM_TARGET) $(BENCH_TARGET)

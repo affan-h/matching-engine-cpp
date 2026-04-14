@@ -72,19 +72,6 @@ void MatchingEngine::logTrade(const Trade& trade)
               << "\n";
 }
 
-// void MatchingEngine::reportTrade(const Trade& trade)
-// {
-//     std::cout << "TRADE "
-//               << trade.symbol
-//               << " TID=" << trade.tradeId
-//               << " TIME=" << formatTimestamp(trade.timestamp)
-//               << " BUY=" << trade.buyOrderId
-//               << " SELL=" << trade.sellOrderId
-//               << " QTY=" << trade.quantity
-//               << " PRICE=" << trade.price
-//               << "\n";
-// }
-
 OrderId MatchingEngine::generateOrderId()
 {
     return ++nextOrderId;
@@ -123,6 +110,7 @@ OrderId MatchingEngine::addLimitOrder(
 
             incoming.quantity -= tradeQty;
             best.quantity -= tradeQty;
+            book.reduceAskVolume(best.price, tradeQty);
 
             if (best.quantity == 0)
                 book.removeBestAsk();
@@ -145,6 +133,7 @@ OrderId MatchingEngine::addLimitOrder(
 
             incoming.quantity -= tradeQty;
             best.quantity -= tradeQty;
+            book.reduceBidVolume(best.price, tradeQty);
 
             if (best.quantity == 0)
                 book.removeBestBid();
@@ -186,6 +175,7 @@ OrderId MatchingEngine::addMarketOrder(
 
             incoming.quantity -= tradeQty;
             best.quantity -= tradeQty;
+            book.reduceAskVolume(best.price, tradeQty);
 
             if (best.quantity == 0)
                 book.removeBestAsk();
@@ -204,6 +194,7 @@ OrderId MatchingEngine::addMarketOrder(
 
             incoming.quantity -= tradeQty;
             best.quantity -= tradeQty;
+            book.reduceBidVolume(best.price, tradeQty);
 
             if (best.quantity == 0)
                 book.removeBestBid();
@@ -246,7 +237,7 @@ bool MatchingEngine::modifyOrder(
     return true;
 }
 
-void MatchingEngine::printBook(const std::string& symbol) const
+void MatchingEngine::printOrderBook(const std::string& symbol) const
 {
     auto it = books.find(symbol);
     if (it == books.end())

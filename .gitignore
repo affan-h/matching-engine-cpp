@@ -1,7 +1,8 @@
+build/
+*.o
 engine
 simulation
-performance
-*.o
+benchmark
 *.out
 .DS_Store
 .vscode

@@ -41,7 +41,7 @@ public:
         Quantity newQty
     );
 
-    void printBook(const std::string& symbol) const;
+    void printOrderBook(const std::string& symbol) const;
 
     Trade createTrade(
         const std::string& symbol,

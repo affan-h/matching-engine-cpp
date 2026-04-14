@@ -1,176 +1,167 @@
 #include "matching_engine.h"
 #include <iostream>
+#include <vector>
+
 using namespace std;
 
-void basicTest(MatchingEngine& engine)
+void separator(const string& title)
 {
-cout << "\n=== BASIC MATCH TEST ===\n";
-auto buyId  = engine.addLimitOrder("AAPL", Side::Buy, 100, 50);
-auto sellId = engine.addLimitOrder("AAPL", Side::Sell, 100, 30);
-
+    cout << "\n==================== " << title << " ====================\n";
 }
 
-void partialFillTest(MatchingEngine& engine)
+void basicTest()
 {
-cout << "\n=== PARTIAL FILL TEST ===\n";
-auto buyId  = engine.addLimitOrder("AAPL", Side::Buy, 101, 100);
-auto sellId = engine.addLimitOrder("AAPL", Side::Sell, 101, 40);
+    separator("BASIC MATCH");
 
+    MatchingEngine engine;
+
+    auto id1 = engine.addLimitOrder("AAPL", Side::Buy, 100, 10);
+    auto id2 = engine.addLimitOrder("AAPL", Side::Sell, 100, 10);
+
+    engine.printOrderBook("AAPL");
 }
 
-void multiLevelTest(MatchingEngine& engine)
+void partialFillTest()
 {
-cout << "\n=== MULTI LEVEL MATCH ===\n";
-engine.addLimitOrder("AAPL", Side::Sell, 102, 50);
-engine.addLimitOrder("AAPL", Side::Sell, 103, 50);
+    separator("PARTIAL FILL");
 
-engine.addLimitOrder("AAPL", Side::Buy, 105, 80);
+    MatchingEngine engine;
 
+    engine.addLimitOrder("AAPL", Side::Buy, 100, 20);
+    engine.addLimitOrder("AAPL", Side::Sell, 100, 5);
+
+    engine.printOrderBook("AAPL");
 }
 
-void marketOrderTest(MatchingEngine& engine)
+void multiLevelTest()
 {
-cout << "\n=== MARKET ORDER TEST ===\n";
+    separator("MULTI LEVEL MATCH");
 
-engine.addLimitOrder("AAPL", Side::Sell, 101, 40);
-engine.addLimitOrder("AAPL", Side::Sell, 102, 40);
+    MatchingEngine engine;
 
-engine.addMarketOrder("AAPL", Side::Buy, 60);
+    engine.addLimitOrder("AAPL", Side::Sell, 101, 10);
+    engine.addLimitOrder("AAPL", Side::Sell, 102, 10);
+    engine.addLimitOrder("AAPL", Side::Sell, 103, 10);
 
+    engine.addMarketOrder("AAPL", Side::Buy, 25);
+
+    engine.printOrderBook("AAPL");
 }
 
-void cancellationTest(MatchingEngine& engine)
+void marketOrderTest()
 {
-cout << "\n=== CANCEL TEST ===\n";
+    separator("MARKET ORDER");
 
-auto id = engine.addLimitOrder("AAPL", Side::Buy, 99, 50);
+    MatchingEngine engine;
 
-bool cancelled = engine.cancelOrder("AAPL", id);
-cout << "Cancel result: " << cancelled << "\n";
+    engine.addLimitOrder("AAPL", Side::Sell, 100, 10);
+    engine.addLimitOrder("AAPL", Side::Sell, 101, 10);
 
-// Should NOT match because order was cancelled
-engine.addLimitOrder("AAPL", Side::Sell, 99, 50);
+    engine.addMarketOrder("AAPL", Side::Buy, 15);
 
+    engine.printOrderBook("AAPL");
 }
 
-void cancelNonExistentTest(MatchingEngine& engine)
+void cancelTest()
 {
-cout << "\n=== CANCEL NON-EXISTENT TEST ===\n";
+    separator("CANCEL ORDER");
 
-bool cancelled = engine.cancelOrder("AAPL", 999999);
-cout << "Cancel result (should be 0): " << cancelled << "\n";
+    MatchingEngine engine;
 
+    auto id1 = engine.addLimitOrder("AAPL", Side::Buy, 100, 10);
+    auto id2 = engine.addLimitOrder("AAPL", Side::Buy, 101, 10);
+
+    engine.cancelOrder("AAPL", id1);
+
+    engine.printOrderBook("AAPL");
 }
 
-void modifyTest(MatchingEngine& engine)
+void modifyTest()
 {
-cout << "\n=== MODIFY TEST ===\n";
+    separator("MODIFY ORDER");
 
-auto id = engine.addLimitOrder("AAPL", Side::Buy, 98, 40);
+    MatchingEngine engine;
 
-engine.modifyOrder("AAPL", id, 102, 40);
+    auto id = engine.addLimitOrder("AAPL", Side::Buy, 100, 10);
 
-// Should trigger trade
-engine.addLimitOrder("AAPL", Side::Sell, 101, 40);
+    engine.modifyOrder("AAPL", id, 105, 10);
 
+    engine.printOrderBook("AAPL");
 }
 
-void modifyNonExistentTest(MatchingEngine& engine)
+void fifoTest()
 {
-cout << "\n=== MODIFY NON-EXISTENT TEST ===\n";
+    separator("FIFO TEST");
 
-engine.modifyOrder("AAPL", 999999, 105, 50); // should safely do nothing
+    MatchingEngine engine;
 
+    engine.addLimitOrder("AAPL", Side::Buy, 100, 10); // first
+    engine.addLimitOrder("AAPL", Side::Buy, 100, 10); // second
+
+    engine.addLimitOrder("AAPL", Side::Sell, 100, 15);
+
+    engine.printOrderBook("AAPL");
 }
 
-void fifoTest(MatchingEngine& engine)
+void stressTest()
 {
-cout << "\n=== FIFO TEST ===\n";
+    separator("STRESS TEST");
 
-auto b1 = engine.addLimitOrder("AAPL", Side::Buy, 100, 30);
-auto b2 = engine.addLimitOrder("AAPL", Side::Buy, 100, 30);
+    MatchingEngine engine;
 
-engine.addLimitOrder("AAPL", Side::Sell, 100, 50);
+    const int N = 100000;
+    vector<OrderId> ids;
 
-// Expected:
-// First 30 fills b1
-// Next 20 fills b2
+    // Insert
+    for (int i = 0; i < N; i++)
+    {    
+        ids.push_back(engine.addLimitOrder("AAPL", Side::Buy, 100 + (i % 10), 10));
+    }
 
+    // Cancel half
+    for (int i = 0; i < N; i += 2)
+    {
+        engine.cancelOrder("AAPL", ids[i]); // based on your ID scheme
+    }
+
+    // Match
+    for (int i = 0; i < N; i++)
+    {
+        engine.addMarketOrder("AAPL", Side::Sell, 5);
+    }
+
+    engine.printOrderBook("AAPL");
 }
 
-void stressTest(MatchingEngine& engine)
+void edgeCaseTest()
 {
-cout << "\n=== STRESS TEST ===\n";
+    separator("EDGE CASES");
 
-// Many buys
-for (int i = 0; i < 50; i++)
-{
-    engine.addLimitOrder("AAPL", Side::Buy, 95 + (i % 5), 10);
-}
+    MatchingEngine engine;
 
-// Many sells
-for (int i = 0; i < 50; i++)
-{
-    engine.addLimitOrder("AAPL", Side::Sell, 95 + (i % 5), 10);
-}
+    // Cancel non-existent
+    engine.cancelOrder("AAPL", 999999);
 
-// Large market order
-engine.addMarketOrder("AAPL", Side::Buy, 200);
+    // Market order on empty book
+    engine.addMarketOrder("AAPL", Side::Buy, 10);
 
+    // Modify non-existent
+    engine.modifyOrder("AAPL", 999999, 200, 10);
+
+    engine.printOrderBook("AAPL");
 }
 
 int main()
 {
-{
-MatchingEngine engine;
-basicTest(engine);
-}
+    basicTest();
+    partialFillTest();
+    multiLevelTest();
+    marketOrderTest();
+    cancelTest();
+    modifyTest();
+    fifoTest();
+    edgeCaseTest();
+    stressTest();
 
-{
-    MatchingEngine engine;
-    partialFillTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    multiLevelTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    marketOrderTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    cancellationTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    cancelNonExistentTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    modifyTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    modifyNonExistentTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    fifoTest(engine);
-}
-
-{
-    MatchingEngine engine;
-    stressTest(engine);
-}
-
-return 0;
-
+    return 0;
 }
