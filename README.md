@@ -1,458 +1,253 @@
 # Limit Order Book Matching Engine (C++)
 
-A production-style implementation of a **price–time priority limit order book and matching engine** in C++, inspired by modern electronic trading systems.
+A production-style implementation of a price–time priority limit order book and matching engine in C++, inspired by modern electronic trading systems and low-latency trading infrastructure.
 
 ---
 
-## 🚀 Features
+## Overview
 
-* Limit orders (Buy / Sell)
-* Market orders
-* Order cancellation (O(1))
-* Order modification (cancel + replace)
-* FIFO matching within price levels
-* Multi-symbol support
-* Trade event generation with timestamps
-* Interactive CLI trading interface
+This project implements a high-performance matching engine with a strong focus on:
 
----
+- Deterministic latency
+- Cache-efficient data structures
+- O(1) operations for critical paths
+- Real-world exchange design principles
 
-## 🧠 Architecture
-
-The system is designed with **clear separation of concerns**:
-
-```
-Client (CLI)
-     │
-     ▼
-MatchingEngine   ← (logic)
-     │
-     ▼
-OrderBook        ← (data structure)
-     │
-     ▼
-Price Levels (FIFO queues)
-```
+The system evolved from a basic implementation into a low-latency engine through multiple optimization phases.
 
 ---
 
-### 🔹 MatchingEngine (Logic Layer)
+## Features
 
-Responsible for:
-
-* Order lifecycle management
-* Matching algorithm (price–time priority)
-* Trade generation
-* Symbol routing
-
----
-
-### 🔹 OrderBook (Storage Layer)
-
-Responsible for:
-
-* Maintaining bid/ask ladders
-* Managing price levels
-* O(1) order lookup for cancellation
+- Limit orders (Buy / Sell)
+- Market orders
+- Order cancellation (O(1))
+- Order modification (cancel + replace)
+- FIFO matching within price levels
+- Multi-symbol support
+- Trade event generation with timestamps
+- CLI-based simulator
+- Stress and correctness testing suite
 
 ---
 
-## ⚙️ Core Design
+## Architecture
+Client (CLI / Simulation)
+│
+▼
+MatchingEngine (Logic Layer)
+│
+▼
+OrderBook (Data Structure Layer)
+│
+▼
+Price Levels (Intrusive FIFO Queues)
 
-### Price Ladder (Optimized)
+---
 
-Instead of `std::map`, the order book uses:
+## Core Design
 
-```
+### Price Ladder
+
+The order book uses a direct-index price ladder:
 vector<PriceLevel>
-```
 
-* Index = price
-* O(1) insertion
-* Cache-friendly
-
----
-
-### Active Price Bitmap
-
-```
-bitset<MAX_PRICE>
-```
-
-Tracks active price levels:
-
-* Fast best bid/ask lookup
-* Avoids scanning empty levels
+- Index corresponds to price
+- Constant-time access
+- Cache-friendly layout
+- Eliminates tree-based structures
 
 ---
 
-### FIFO at Price Level
+### Bitmap for Active Prices
 
-```
-std::list<Order>
-```
+A bitmap tracks active price levels:
+vector<uint64_t>
 
-* Preserves time priority
-* Supports O(1) removal via iterator
-
----
-
-### O(1) Cancellation
-
-```
-unordered_map<OrderId → iterator>
-```
-
-* Direct access to orders
-* Constant-time deletion
+- Fast best bid/ask lookup using bit operations
+- Avoids scanning empty levels
+- Uses CPU intrinsics for efficiency
 
 ---
 
-## 🔁 Matching Logic
+### Intrusive Linked List
 
-Matching follows **price–time priority**:
+Orders are stored using an intrusive doubly linked list:
+Order {
+Order* prev;
+Order* next;
+...
+}
 
-```
-while (incoming.qty > 0)
-    match against best opposing order
-```
+- Eliminates std::list overhead
+- No iterator indirection
+- Improved cache locality
+
+---
+
+### Memory Pool Allocator
+
+Custom memory pool replaces dynamic allocation:
+
+- No malloc/free in hot path
+- Deterministic allocation time
+- Reduced fragmentation
+- Improved performance stability
+
+---
+
+### Direct Index Lookup (Vector-Based)
+
+Replaced hash map with direct indexing:
+vector<Order*> orderLookup
+
+- True O(1) lookup
+- No hashing or collisions
+- Significant improvement in cancel latency
+
+---
+
+## Matching Logic
+
+Matching follows strict price–time priority:
+while (incoming.quantity > 0)
+     match against best opposing order
 
 Rules:
 
-1. Better price executes first
-2. Same price → FIFO
-3. Partial fills allowed
-4. Remaining quantity added to book
+1. Better price has priority
+2. Same price follows FIFO
+3. Partial fills supported
+4. Remaining quantity is inserted into book
 
 ---
 
-## 📊 Trade Events
+## Trade Events
 
-Each trade contains:
+Each trade includes:
 
-* Trade ID
-* Symbol
-* Buy Order ID
-* Sell Order ID
-* Quantity
-* Price
-* Timestamp (real-time)
-* Aggressor side (BUY / SELL)
+- Trade ID
+- Symbol
+- Buy Order ID
+- Sell Order ID
+- Quantity
+- Price
+- Timestamp (microsecond precision)
+- Aggressor side
 
 Example:
-
-```
-TRADE AAPL TID=1 TIME=2026-03-29 17:45:39.003860 
-BUY=100001 SELL=100002 QTY=30 PRICE=100 AGG=BUY
-```
+TRADE AAPL TID=1 TIME=2026-04-14 14:46:17.357856 BUY=100001 SELL=100002 QTY=10 PRICE=100 AGG=SELL
 
 ---
 
-## 🖥️ CLI Simulator
+## Performance Characteristics
 
-Interactive trading interface:
-
-```
-BUY AAPL 100 50
-SELL AAPL 101 20
-MARKET_BUY AAPL 30
-CANCEL AAPL 100001
-MODIFY AAPL 100001 105 40
-PRINT AAPL
-EXIT
-```
+| Operation        | Complexity | Notes                      |
+|-----------------|-----------|---------------------------|
+| Insert Order     | O(1)      | Memory + cache bound      |
+| Cancel Order     | O(1)      | Direct index lookup       |
+| Best Bid / Ask   | O(1)      | Bitmap-based              |
+| Matching         | O(K)      | K = matched orders        |
 
 ---
 
-## ⏱️ Time Complexity
+## Benchmark Results
 
-| Operation      | Complexity |
-| -------------- | ---------- |
-| Insert Order   | O(1)       |
-| Cancel Order   | O(1)       |
-| Best Bid / Ask | O(1)       |
-| Matching       | O(K)       |
+Measured using a custom benchmarking harness:
 
-K = number of matched orders
+| Operation | Latency (approx) |
+|----------|------------------|
+| Insert   | ~1000 ns         |
+| Match    | ~140 ns          |
+| Cancel   | ~25 ns           |
+| Mixed    | ~1100 ns         |
 
----
+Key observation:
 
-## 🧪 Testing
-
-Includes:
-
-* Basic matching
-* Partial fills
-* Multi-level matching
-* Market orders
-* Cancellation
-* Modification
-* FIFO validation
-* Stress testing
+- System is memory-bound, not CPU-bound
+- Matching and cancellation are highly optimized
+- Insert latency dominated by cache misses
 
 ---
 
-## 🧠 Key Learnings
+## Testing
 
-* Designing low-latency data structures
-* Managing order lifecycle safely in C++
-* Avoiding iterator invalidation bugs
-* Building scalable system architecture
-* Trade-offs: `map` vs price ladder vs bitmap
+The simulation suite covers:
 
----
-
-## 🚀 Future Improvements
-
-* Lock-free matching engine (multi-threaded)
-* Memory pool allocator
-* Market data feed (order book streaming)
-* Persistent storage (replay engine)
-* Web-based visualization UI
+- Basic matching
+- Partial fills
+- Multi-level matching
+- Market orders
+- Cancellation
+- Modification
+- FIFO validation
+- Edge cases
+- Stress testing
 
 ---
 
-## 📌 Summary
+## Key Improvements Over Initial Design
+
+| Area | Initial | Final |
+|------|--------|-------|
+| Price structure | std::map | vector ladder |
+| Best price lookup | linear scan | bitmap |
+| Order storage | std::list | intrusive list |
+| Allocation | new/delete | memory pool |
+| Lookup | unordered_map | vector indexing |
+| Latency | variable | deterministic |
+
+---
+
+## Notable Bug Fix
+
+Fixed a critical inconsistency in partial fills:
+
+- Previously, order quantity was updated but price level volume was not
+- This caused incorrect book state after trades
+- Resolved by updating level volume during matching
+
+---
+
+## Design Tradeoffs
+
+### Advantages
+
+- Predictable latency
+- High cache efficiency
+- Minimal allocation overhead
+- Realistic exchange-style architecture
+
+### Tradeoffs
+
+- Fixed price range (vector ladder)
+- Higher memory usage (direct indexing)
+- Increased implementation complexity
+- Manual memory management
+
+---
+
+## Future Work
+
+- Lock-free multi-threaded matching engine
+- Per-symbol sharding across CPU cores
+- Cache-line alignment and struct packing
+- Market data feed (L2/L3 book streaming)
+- Persistence and replay system
+
+---
+
+## Summary
 
 This project demonstrates:
 
-* Strong systems design
-* Low-level performance optimization
-* Real-world financial system modeling
+- Low-latency systems design
+- Data structure optimization for performance
+- Cache-aware programming
+- Real-world trading system concepts
 
 It is suitable for:
 
-* Backend engineering roles
-* Quant / trading system roles
-* Low-latency system design discussions
-
----
-# Limit Order Book Matching Engine (C++)
-
-A production-style implementation of a **price–time priority limit order book and matching engine** in C++, inspired by modern electronic trading systems.
-
----
-
-## 🚀 Features
-
-* Limit orders (Buy / Sell)
-* Market orders
-* Order cancellation (O(1))
-* Order modification (cancel + replace)
-* FIFO matching within price levels
-* Multi-symbol support
-* Trade event generation with timestamps
-* Interactive CLI trading interface
-
----
-
-## 🧠 Architecture
-
-The system is designed with **clear separation of concerns**:
-
-```
-Client (CLI)
-     │
-     ▼
-MatchingEngine   ← (logic)
-     │
-     ▼
-OrderBook        ← (data structure)
-     │
-     ▼
-Price Levels (FIFO queues)
-```
-
----
-
-### 🔹 MatchingEngine (Logic Layer)
-
-Responsible for:
-
-* Order lifecycle management
-* Matching algorithm (price–time priority)
-* Trade generation
-* Symbol routing
-
----
-
-### 🔹 OrderBook (Storage Layer)
-
-Responsible for:
-
-* Maintaining bid/ask ladders
-* Managing price levels
-* O(1) order lookup for cancellation
-
----
-
-## ⚙️ Core Design
-
-### Price Ladder (Optimized)
-
-Instead of `std::map`, the order book uses:
-
-```
-vector<PriceLevel>
-```
-
-* Index = price
-* O(1) insertion
-* Cache-friendly
-
----
-
-### Active Price Bitmap
-
-```
-bitset<MAX_PRICE>
-```
-
-Tracks active price levels:
-
-* Fast best bid/ask lookup
-* Avoids scanning empty levels
-
----
-
-### FIFO at Price Level
-
-```
-std::list<Order>
-```
-
-* Preserves time priority
-* Supports O(1) removal via iterator
-
----
-
-### O(1) Cancellation
-
-```
-unordered_map<OrderId → iterator>
-```
-
-* Direct access to orders
-* Constant-time deletion
-
----
-
-## 🔁 Matching Logic
-
-Matching follows **price–time priority**:
-
-```
-while (incoming.qty > 0)
-    match against best opposing order
-```
-
-Rules:
-
-1. Better price executes first
-2. Same price → FIFO
-3. Partial fills allowed
-4. Remaining quantity added to book
-
----
-
-## 📊 Trade Events
-
-Each trade contains:
-
-* Trade ID
-* Symbol
-* Buy Order ID
-* Sell Order ID
-* Quantity
-* Price
-* Timestamp (real-time)
-* Aggressor side (BUY / SELL)
-
-Example:
-
-```
-TRADE AAPL TID=1 TIME=2026-03-29 17:45:39.003860 
-BUY=100001 SELL=100002 QTY=30 PRICE=100 AGG=BUY
-```
-
----
-
-## 🖥️ CLI Simulator
-
-Interactive trading interface:
-
-```
-BUY AAPL 100 50
-SELL AAPL 101 20
-MARKET_BUY AAPL 30
-CANCEL AAPL 100001
-MODIFY AAPL 100001 105 40
-PRINT AAPL
-EXIT
-```
-
----
-
-## ⏱️ Time Complexity
-
-| Operation      | Complexity |
-| -------------- | ---------- |
-| Insert Order   | O(1)       |
-| Cancel Order   | O(1)       |
-| Best Bid / Ask | O(1)       |
-| Matching       | O(K)       |
-
-K = number of matched orders
-
----
-
-## 🧪 Testing
-
-Includes:
-
-* Basic matching
-* Partial fills
-* Multi-level matching
-* Market orders
-* Cancellation
-* Modification
-* FIFO validation
-* Stress testing
-
----
-
-## 🧠 Key Learnings
-
-* Designing low-latency data structures
-* Managing order lifecycle safely in C++
-* Avoiding iterator invalidation bugs
-* Building scalable system architecture
-* Trade-offs: `map` vs price ladder vs bitmap
-
----
-
-## 🚀 Future Improvements
-
-* Lock-free matching engine (multi-threaded)
-* Memory pool allocator
-* Market data feed (order book streaming)
-* Persistent storage (replay engine)
-* Web-based visualization UI
-
----
-
-## 📌 Summary
-
-This project demonstrates:
-
-* Strong systems design
-* Low-level performance optimization
-* Real-world financial system modeling
-
-It is suitable for:
-
-* Backend engineering roles
-* Quant / trading system roles
-* Low-latency system design discussions
-
----
+- Backend systems roles
+- Quantitative trading roles
+- Low-latency and high-performance system design discussions
