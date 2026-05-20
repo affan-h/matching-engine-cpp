@@ -50,76 +50,100 @@ void runMatchingEngine(SPSCQueue& queue, MatchingEngine& engine) {
 // ---------------------------------------------------------
 // THE PRODUCER (NETWORK GATEWAY SIMULATOR)
 // ---------------------------------------------------------
-void simulateNetworkTraffic(SPSCQueue& queue, int num_orders) {
-    InstrumentId aapl = 1;
+void simulateNetworkTraffic(
+    SPSCQueue& queue,
+    int num_orders,
+    InstrumentId AAPL,
+    InstrumentId RELIANCE,
+    InstrumentId INFY,
+    InstrumentId TATASTEEL)
+{
+    // Each instrument trades around a different reference price
+    // to feel realistic
+    struct InstrumentProfile {
+        InstrumentId id;
+        int basePrice;
+    };
+
+    InstrumentProfile profiles[] = {
+        {AAPL,      150},
+        {RELIANCE,  2800},
+        {INFY,      1400},
+        {TATASTEEL, 140}
+    };
+
     auto start = high_resolution_clock::now();
 
     for (int i = 0; i < num_orders; ++i) {
+        auto& prof = profiles[i % 4];   // round-robin across instruments
         OrderEvent event;
-        event.instrument = aapl;
+        event.instrument = prof.id;
         event.qty = 10;
-        
+
         if (i % 3 == 0) {
             event.type = EventType::LimitOrder;
             event.side = Side::Buy;
-            event.price = 100;
+            event.price = prof.basePrice;
             event.tif = TimeInForce::GTC;
         } else if (i % 3 == 1) {
             event.type = EventType::MarketOrder;
             event.side = Side::Sell;
             event.price = 0;
-            event.tif = TimeInForce::IOC; // Market orders are effectively IOCs anyway
+            event.tif = TimeInForce::IOC;
         } else {
             event.type = EventType::LimitOrder;
             event.side = Side::Sell;
-            event.price = 99; // Aggressive sell
-            event.tif = TimeInForce::IOC; // Match what you can, drop the rest
+            event.price = prof.basePrice - 1;  // aggressive sell, crosses spread
+            event.tif = TimeInForce::IOC;
         }
 
-        // Push to the ring buffer. 
-        // If the queue is full (Matcher is falling behind), we busy-wait until space frees up.
-        while (!queue.push(event)) {
-            // In a real system, you would log a critical "backpressure" warning here.
-        }
+        while (!queue.push(event)) {}
     }
 
     auto end = high_resolution_clock::now();
-    auto duration = duration_cast<milliseconds>(end - start).count();
-    
-    cout << "[Gateway] Successfully pushed " << num_orders << " orders to the Ring Buffer in " << duration << " ms.\n";
-    
-    // Signal the matcher thread that no more orders are coming.
+    auto ms = duration_cast<milliseconds>(end - start).count();
+    cout << "[Gateway] Pushed " << num_orders
+         << " orders across 4 instruments in " << ms << " ms.\n";
+
     is_running.store(false, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------
 // MAIN ENTRY POINT
 // ---------------------------------------------------------
+// In main(), register instruments before spawning threads:
 int main() {
     cout << "===== Multi-Threaded Matching Engine Simulation =====\n\n";
 
     SPSCQueue queue(1'000'000);
     MatchingEngine engine;
+
+    // Register instruments upfront
+    InstrumentId AAPL     = engine.registerInstrument("AAPL");
+    InstrumentId RELIANCE = engine.registerInstrument("RELIANCE");
+    InstrumentId INFY     = engine.registerInstrument("INFY");
+    InstrumentId TATASTEEL= engine.registerInstrument("TATASTEEL");
+
     int total_orders = 5'000'000;
 
     auto start = high_resolution_clock::now();
-
     std::thread engine_thread(runMatchingEngine, std::ref(queue), std::ref(engine));
-    simulateNetworkTraffic(queue, total_orders);
+    simulateNetworkTraffic(queue, total_orders, AAPL, RELIANCE, INFY, TATASTEEL);
     engine_thread.join();
-
     auto end = high_resolution_clock::now();
     auto total_ms = duration_cast<milliseconds>(end - start).count();
 
-    cout << "[System] Engine drained the queue and shut down gracefully.\n\n";
+    cout << "[System] Engine shut down gracefully.\n\n";
     cout << "===== Final Report =====\n";
     cout << "Orders submitted : " << total_orders << "\n";
     cout << "Trades executed  : " << engine.getTotalTrades() << "\n";
-    cout << "Total time       : " << total_ms << " ms\n";
-    cout << "Throughput       : " << (total_orders * 1000 / total_ms) << " orders/sec\n\n";
+    cout << "Total time       : " << total_ms << " ms\n\n";
 
-    cout << "===== Final Order Book (Instrument 1) =====\n";
-    engine.printOrderBook(1);
+    // Print book for each instrument
+    for (const string& sym : {"AAPL", "RELIANCE", "INFY", "TATASTEEL"}) {
+        cout << "===== Order Book: " << sym << " =====\n";
+        engine.printOrderBook(engine.getInstrumentId(sym));
+    }
 
     return 0;
 }
