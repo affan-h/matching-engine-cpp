@@ -54,6 +54,8 @@ public:
     bool cancelOrder(OrderId orderId);
     bool getOrder(OrderId id, Order& outOrder);
 
+    bool reduceOrderSize(OrderId id, Quantity newQty);
+
     void reduceBidVolume(Price price, Quantity qty);
     void reduceAskVolume(Price price, Quantity qty);
 

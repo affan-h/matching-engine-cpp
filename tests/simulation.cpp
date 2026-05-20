@@ -1,167 +1,125 @@
-#include "matching_engine.h"
 #include <iostream>
+#include <thread>
 #include <vector>
+#include <atomic>
+#include <chrono>
+#include "matching_engine.h"
+#include "spsc_queue.h"
 
 using namespace std;
+using namespace std::chrono;
 
-void separator(const string& title)
-{
-    cout << "\n==================== " << title << " ====================\n";
+// This atomic flag allows the Producer to safely tell the Consumer to shut down
+std::atomic<bool> is_running{true};
+
+// ---------------------------------------------------------
+// THE CONSUMER (MATCHING ENGINE CORE)
+// ---------------------------------------------------------
+void runMatchingEngine(SPSCQueue& queue, MatchingEngine& engine) {
+    OrderEvent event;
+
+    // The "Spin Loop" - In low-latency systems, this thread is pinned to an 
+    // isolated CPU core and NEVER sleeps or yields. It aggressively polls the queue.
+    while (true) {
+        if (queue.pop(event)) {
+            // We got an order! Route it to the correct engine function.
+            switch (event.type) {
+                case EventType::LimitOrder:
+                    engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif);
+                    break;
+                case EventType::MarketOrder:
+                    engine.addMarketOrder(event.instrument, event.side, event.qty);
+                    break;
+                case EventType::CancelOrder:
+                    engine.cancelOrder(event.instrument, event.id);
+                    break;
+                case EventType::ModifyOrder:
+                    engine.modifyOrder(event.instrument, event.id, event.price, event.qty);
+                    break;
+            }
+        } else {
+            // The queue is empty.
+            // Check if the gateway has signaled a shutdown.
+            if (!is_running.load(std::memory_order_relaxed)) {
+                break; // Exit the endless loop
+            }
+        }
+    }
 }
 
-void basicTest()
-{
-    separator("BASIC MATCH");
+// ---------------------------------------------------------
+// THE PRODUCER (NETWORK GATEWAY SIMULATOR)
+// ---------------------------------------------------------
+void simulateNetworkTraffic(SPSCQueue& queue, int num_orders) {
+    InstrumentId aapl = 1;
+    auto start = high_resolution_clock::now();
 
-    MatchingEngine engine;
+    for (int i = 0; i < num_orders; ++i) {
+        OrderEvent event;
+        event.instrument = aapl;
+        event.qty = 10;
+        
+        if (i % 3 == 0) {
+            event.type = EventType::LimitOrder;
+            event.side = Side::Buy;
+            event.price = 100;
+            event.tif = TimeInForce::GTC;
+        } else if (i % 3 == 1) {
+            event.type = EventType::MarketOrder;
+            event.side = Side::Sell;
+            event.price = 0;
+            event.tif = TimeInForce::IOC; // Market orders are effectively IOCs anyway
+        } else {
+            event.type = EventType::LimitOrder;
+            event.side = Side::Sell;
+            event.price = 99; // Aggressive sell
+            event.tif = TimeInForce::IOC; // Match what you can, drop the rest
+        }
 
-    auto id1 = engine.addLimitOrder("AAPL", Side::Buy, 100, 10);
-    auto id2 = engine.addLimitOrder("AAPL", Side::Sell, 100, 10);
-
-    engine.printOrderBook("AAPL");
-}
-
-void partialFillTest()
-{
-    separator("PARTIAL FILL");
-
-    MatchingEngine engine;
-
-    engine.addLimitOrder("AAPL", Side::Buy, 100, 20);
-    engine.addLimitOrder("AAPL", Side::Sell, 100, 5);
-
-    engine.printOrderBook("AAPL");
-}
-
-void multiLevelTest()
-{
-    separator("MULTI LEVEL MATCH");
-
-    MatchingEngine engine;
-
-    engine.addLimitOrder("AAPL", Side::Sell, 101, 10);
-    engine.addLimitOrder("AAPL", Side::Sell, 102, 10);
-    engine.addLimitOrder("AAPL", Side::Sell, 103, 10);
-
-    engine.addMarketOrder("AAPL", Side::Buy, 25);
-
-    engine.printOrderBook("AAPL");
-}
-
-void marketOrderTest()
-{
-    separator("MARKET ORDER");
-
-    MatchingEngine engine;
-
-    engine.addLimitOrder("AAPL", Side::Sell, 100, 10);
-    engine.addLimitOrder("AAPL", Side::Sell, 101, 10);
-
-    engine.addMarketOrder("AAPL", Side::Buy, 15);
-
-    engine.printOrderBook("AAPL");
-}
-
-void cancelTest()
-{
-    separator("CANCEL ORDER");
-
-    MatchingEngine engine;
-
-    auto id1 = engine.addLimitOrder("AAPL", Side::Buy, 100, 10);
-    auto id2 = engine.addLimitOrder("AAPL", Side::Buy, 101, 10);
-
-    engine.cancelOrder("AAPL", id1);
-
-    engine.printOrderBook("AAPL");
-}
-
-void modifyTest()
-{
-    separator("MODIFY ORDER");
-
-    MatchingEngine engine;
-
-    auto id = engine.addLimitOrder("AAPL", Side::Buy, 100, 10);
-
-    engine.modifyOrder("AAPL", id, 105, 10);
-
-    engine.printOrderBook("AAPL");
-}
-
-void fifoTest()
-{
-    separator("FIFO TEST");
-
-    MatchingEngine engine;
-
-    engine.addLimitOrder("AAPL", Side::Buy, 100, 10); // first
-    engine.addLimitOrder("AAPL", Side::Buy, 100, 10); // second
-
-    engine.addLimitOrder("AAPL", Side::Sell, 100, 15);
-
-    engine.printOrderBook("AAPL");
-}
-
-void stressTest()
-{
-    separator("STRESS TEST");
-
-    MatchingEngine engine;
-
-    const int N = 100000;
-    vector<OrderId> ids;
-
-    // Insert
-    for (int i = 0; i < N; i++)
-    {    
-        ids.push_back(engine.addLimitOrder("AAPL", Side::Buy, 100 + (i % 10), 10));
+        // Push to the ring buffer. 
+        // If the queue is full (Matcher is falling behind), we busy-wait until space frees up.
+        while (!queue.push(event)) {
+            // In a real system, you would log a critical "backpressure" warning here.
+        }
     }
 
-    // Cancel half
-    for (int i = 0; i < N; i += 2)
-    {
-        engine.cancelOrder("AAPL", ids[i]); // based on your ID scheme
-    }
-
-    // Match
-    for (int i = 0; i < N; i++)
-    {
-        engine.addMarketOrder("AAPL", Side::Sell, 5);
-    }
-
-    engine.printOrderBook("AAPL");
+    auto end = high_resolution_clock::now();
+    auto duration = duration_cast<milliseconds>(end - start).count();
+    
+    cout << "[Gateway] Successfully pushed " << num_orders << " orders to the Ring Buffer in " << duration << " ms.\n";
+    
+    // Signal the matcher thread that no more orders are coming.
+    is_running.store(false, std::memory_order_relaxed);
 }
 
-void edgeCaseTest()
-{
-    separator("EDGE CASES");
+// ---------------------------------------------------------
+// MAIN ENTRY POINT
+// ---------------------------------------------------------
+int main() {
+    cout << "===== Multi-Threaded Matching Engine Simulation =====\n\n";
 
+    SPSCQueue queue(1'000'000);
     MatchingEngine engine;
+    int total_orders = 5'000'000;
 
-    // Cancel non-existent
-    engine.cancelOrder("AAPL", 999999);
+    auto start = high_resolution_clock::now();
 
-    // Market order on empty book
-    engine.addMarketOrder("AAPL", Side::Buy, 10);
+    std::thread engine_thread(runMatchingEngine, std::ref(queue), std::ref(engine));
+    simulateNetworkTraffic(queue, total_orders);
+    engine_thread.join();
 
-    // Modify non-existent
-    engine.modifyOrder("AAPL", 999999, 200, 10);
+    auto end = high_resolution_clock::now();
+    auto total_ms = duration_cast<milliseconds>(end - start).count();
 
-    engine.printOrderBook("AAPL");
-}
+    cout << "[System] Engine drained the queue and shut down gracefully.\n\n";
+    cout << "===== Final Report =====\n";
+    cout << "Orders submitted : " << total_orders << "\n";
+    cout << "Trades executed  : " << engine.getTotalTrades() << "\n";
+    cout << "Total time       : " << total_ms << " ms\n";
+    cout << "Throughput       : " << (total_orders * 1000 / total_ms) << " orders/sec\n\n";
 
-int main()
-{
-    basicTest();
-    partialFillTest();
-    multiLevelTest();
-    marketOrderTest();
-    cancelTest();
-    modifyTest();
-    fifoTest();
-    edgeCaseTest();
-    stressTest();
+    cout << "===== Final Order Book (Instrument 1) =====\n";
+    engine.printOrderBook(1);
 
     return 0;
 }

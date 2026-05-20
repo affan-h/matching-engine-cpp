@@ -1,253 +1,206 @@
 # Limit Order Book Matching Engine (C++)
 
-A production-style implementation of a price–time priority limit order book and matching engine in C++, inspired by modern electronic trading systems and low-latency trading infrastructure.
+A high-performance matching engine implemented in C++, modeled after
+the core infrastructure used in electronic trading systems. Built with
+a focus on deterministic latency, cache-efficient data structures, and
+real-world exchange design principles.
 
 ---
 
-## Overview
+## What It Does
 
-This project implements a high-performance matching engine with a strong focus on:
-
-- Deterministic latency
-- Cache-efficient data structures
-- O(1) operations for critical paths
-- Real-world exchange design principles
-
-The system evolved from a basic implementation into a low-latency engine through multiple optimization phases.
-
----
-
-## Features
-
-- Limit orders (Buy / Sell)
-- Market orders
-- Order cancellation (O(1))
-- Order modification (cancel + replace)
-- FIFO matching within price levels
-- Multi-symbol support
-- Trade event generation with timestamps
-- CLI-based simulator
-- Stress and correctness testing suite
+When two traders place opposing orders at compatible prices, a matching
+engine pairs them and generates a trade. This project implements that
+system — the data structures, matching logic, memory management, and
+concurrency layer that make it work at high throughput.
 
 ---
 
 ## Architecture
-Client (CLI / Simulation)
+Network Gateway (Producer Thread)
+│
+│  OrderEvent structs
+▼
+SPSC Ring Buffer          ← lock-free handoff between threads
+│
+│  pop()
+▼
+Matching Engine           ← routes orders by instrument
 │
 ▼
-MatchingEngine (Logic Layer)
+Order Book               ← one per instrument
 │
-▼
-OrderBook (Data Structure Layer)
-│
-▼
-Price Levels (Intrusive FIFO Queues)
+┌────┴────┐
+▼         ▼
+Price      Order
+Levels     Pool             ← zero-allocation hot path
+
+The network layer and matching core run on separate threads, connected
+by a lock-free Single-Producer Single-Consumer queue. The matching
+engine itself is entirely single-threaded — no locks, no contention
+on the critical path.
 
 ---
 
-## Core Design
+## Core Design Decisions
 
-### Price Ladder
+### Price Ladder (vector instead of std::map)
 
-The order book uses a direct-index price ladder:
-vector<PriceLevel>
+The order book uses a direct-indexed array where the index is the
+price. Access is O(1) and cache-friendly. A std::map would give
+O(log n) with heap-allocated nodes scattered in memory.
 
-- Index corresponds to price
-- Constant-time access
-- Cache-friendly layout
-- Eliminates tree-based structures
+Tradeoff: fixed price range (0–100,000) and higher upfront memory
+usage. Acceptable for a single-instrument simulation.
 
----
+### Bitmap for Best Bid/Ask
 
-### Bitmap for Active Prices
-
-A bitmap tracks active price levels:
-vector<uint64_t>
-
-- Fast best bid/ask lookup using bit operations
-- Avoids scanning empty levels
-- Uses CPU intrinsics for efficiency
-
----
+A uint64_t bitmap tracks which price levels are active. Finding the
+best bid or ask uses __builtin_clzll / __builtin_ctzll — single CPU
+instructions. No scanning of empty levels.
 
 ### Intrusive Linked List
 
-Orders are stored using an intrusive doubly linked list:
-Order {
-Order* prev;
-Order* next;
-...
-}
-
-- Eliminates std::list overhead
-- No iterator indirection
-- Improved cache locality
-
----
+Each price level holds orders in a doubly linked list where next/prev
+pointers live inside the Order struct itself. This eliminates the
+separate node allocations that std::list requires and keeps orders
+at the same price level contiguous in pool memory.
 
 ### Memory Pool Allocator
 
-Custom memory pool replaces dynamic allocation:
+A pre-allocated pool of 2 million Order slots replaces new/delete
+entirely. A free-list stack handles reuse after cancels. The matching
+loop makes zero heap allocations.
 
-- No malloc/free in hot path
-- Deterministic allocation time
-- Reduced fragmentation
-- Improved performance stability
+### O(1) Cancel via Direct Index
 
----
-
-### Direct Index Lookup (Vector-Based)
-
-Replaced hash map with direct indexing:
-vector<Order*> orderLookup
-
-- True O(1) lookup
-- No hashing or collisions
-- Significant improvement in cancel latency
-
----
-
-## Matching Logic
-
-Matching follows strict price–time priority:
-while (incoming.quantity > 0)
-     match against best opposing order
-
-Rules:
-
-1. Better price has priority
-2. Same price follows FIFO
-3. Partial fills supported
-4. Remaining quantity is inserted into book
-
----
-
-## Trade Events
-
-Each trade includes:
-
-- Trade ID
-- Symbol
-- Buy Order ID
-- Sell Order ID
-- Quantity
-- Price
-- Timestamp (microsecond precision)
-- Aggressor side
-
-Example:
-TRADE AAPL TID=1 TIME=2026-04-14 14:46:17.357856 BUY=100001 SELL=100002 QTY=10 PRICE=100 AGG=SELL
-
----
-
-## Performance Characteristics
-
-| Operation        | Complexity | Notes                      |
-|-----------------|-----------|---------------------------|
-| Insert Order     | O(1)      | Memory + cache bound      |
-| Cancel Order     | O(1)      | Direct index lookup       |
-| Best Bid / Ask   | O(1)      | Bitmap-based              |
-| Matching         | O(K)      | K = matched orders        |
+A vector<Order*> indexed by OrderId gives instant access to any
+resting order. Cancel is a pointer lookup, a linked list unlink, and
+a bitmap clear — no search required.
 
 ---
 
 ## Benchmark Results
 
-Measured using a custom benchmarking harness:
+Measured on Azure Standard_F4als_v6 (4 vCores @ 3.69 GHz, 32MB L3
+cache), Ubuntu 24.04, compiled with g++ -O3. Compared against a naive
+baseline using std::map + std::queue.
 
-| Operation | Latency (approx) |
-|----------|------------------|
-| Insert   | ~1000 ns         |
-| Match    | ~140 ns          |
-| Cancel   | ~25 ns           |
-| Mixed    | ~1100 ns         |
+| Operation                     | Naive   | Optimized | Notes                    |
+|------------------------------|---------|-----------|--------------------------|
+| Insert                       | 558 ns  | 992 ns    | See note below           |
+| Match                        | 553 ns  | 583 ns    | Similar at low contention|
+| Cancel (isolated)            | 582 ns  | 541 ns    | Marginal                 |
+| Cancel (1000 resting orders) | 1370 ns | 535 ns    | **2.6x faster**          |
 
-Key observation:
+**On insert latency:** The optimized engine is slower on insert because
+its data structures (price ladder + orderLookup vector) are
+significantly larger than a std::map, causing cold cache misses on
+first access. This is a deliberate tradeoff — real matching engines
+experience far more cancel operations than inserts during volatile
+markets, so O(1) cancel is the higher-value optimization.
 
-- System is memory-bound, not CPU-bound
-- Matching and cancellation are highly optimized
-- Insert latency dominated by cache misses
-
----
-
-## Testing
-
-The simulation suite covers:
-
-- Basic matching
-- Partial fills
-- Multi-level matching
-- Market orders
-- Cancellation
-- Modification
-- FIFO validation
-- Edge cases
-- Stress testing
+**On cancel under contention:** The naive implementation scans a queue
+of N orders to find the target — O(n). The optimized engine uses
+orderLookup[id] — O(1) regardless of queue depth. The gap grows
+with the number of resting orders at a price level.
 
 ---
 
-## Key Improvements Over Initial Design
+## Simulation Results
 
-| Area | Initial | Final |
-|------|--------|-------|
-| Price structure | std::map | vector ladder |
-| Best price lookup | linear scan | bitmap |
-| Order storage | std::list | intrusive list |
-| Allocation | new/delete | memory pool |
-| Lookup | unordered_map | vector indexing |
-| Latency | variable | deterministic |
+Multi-threaded simulation processing 5 million orders across a
+producer thread (network gateway) and consumer thread (matching engine),
+connected via the SPSC ring buffer.
+Orders submitted : 5,000,000
+Trades executed  : 1,666,667
+Total time       : ~6.8 seconds
 
 ---
 
-## Notable Bug Fix
+## Key Design Tradeoffs
 
-Fixed a critical inconsistency in partial fills:
-
-- Previously, order quantity was updated but price level volume was not
-- This caused incorrect book state after trades
-- Resolved by updating level volume during matching
-
----
-
-## Design Tradeoffs
-
-### Advantages
-
-- Predictable latency
-- High cache efficiency
-- Minimal allocation overhead
-- Realistic exchange-style architecture
-
-### Tradeoffs
-
-- Fixed price range (vector ladder)
-- Higher memory usage (direct indexing)
-- Increased implementation complexity
-- Manual memory management
+| Decision | Chosen | Alternative | Reason |
+|---|---|---|---|
+| Price structure | vector ladder | std::map | O(1) vs O(log n), cache locality |
+| Best price lookup | bitmap + CPU intrinsic | linear scan | Single instruction |
+| Order storage | intrusive linked list | std::list | No separate node allocation |
+| Memory | pool allocator | new/delete | Zero heap calls in hot path |
+| Order lookup | direct index vector | unordered_map | True O(1), no hashing |
+| Threading | SPSC queue | mutex + shared queue | Zero contention, no lock overhead |
 
 ---
 
-## Future Work
+## Complexity
 
-- Lock-free multi-threaded matching engine
-- Per-symbol sharding across CPU cores
-- Cache-line alignment and struct packing
-- Market data feed (L2/L3 book streaming)
-- Persistence and replay system
+| Operation    | Complexity | Bottleneck          |
+|-------------|-----------|---------------------|
+| Insert       | O(1)      | Cache miss on lookup|
+| Cancel       | O(1)      | Direct index        |
+| Best bid/ask | O(1)      | Bitmap + intrinsic  |
+| Match        | O(k)      | k = orders matched  |
 
 ---
 
-## Summary
+## Time-In-Force Support
 
-This project demonstrates:
+| Type | Behavior |
+|------|----------|
+| GTC (Good Till Cancel) | Rests in book if unfilled |
+| IOC (Immediate Or Cancel) | Fills what it can, discards residual |
 
-- Low-latency systems design
-- Data structure optimization for performance
-- Cache-aware programming
-- Real-world trading system concepts
+---
 
-It is suitable for:
+## How to Build and Run
 
-- Backend systems roles
-- Quantitative trading roles
-- Low-latency and high-performance system design discussions
+**Dependencies:** Google Benchmark (for benchmarks only)
+
+**Run simulation:**
+```bash
+g++ -O2 -std=c++17 \
+    src/matching_engine.cpp src/orderbook.cpp tests/simulation.cpp \
+    -Iinclude -o sim && ./sim
+```
+
+**Run benchmarks:**
+```bash
+g++ -O3 -std=c++17 \
+    tests/benchmark.cpp src/matching_engine.cpp src/orderbook.cpp \
+    -Iinclude -lbenchmark -lpthread -o bench && ./bench
+```
+
+---
+
+## Notable Bug Fixed During Development
+
+During stress testing, a partial fill left the order book in an
+inconsistent state: the matched order's quantity was decremented but
+the price level's totalVolume was not updated. This caused the book
+to report incorrect available volume at that price. Fixed by ensuring
+volume is decremented at the level whenever an order quantity changes.
+
+---
+
+## What This Is Not
+
+This is a simulation, not a production system. It does not include
+persistence, network I/O, market data feeds, or multi-instrument
+sharding. Those would be the next engineering steps.
+
+---
+
+## File Structure
+include/
+types.h               Order, Trade structs and type aliases
+price_level.h         PriceLevel: head/tail pointers + total volume
+order_pool.h          Pool allocator with free-list reuse
+orderbook.h           Order book interface
+matching_engine.h     Engine interface
+network_protocol.h    OrderEvent struct (wire format)
+spsc_queue.h          Lock-free SPSC ring buffer
+src/
+orderbook.cpp         Price ladder, bitmap, intrusive list
+matching_engine.cpp   Matching logic, order routing
+tests/
+simulation.cpp        Multi-threaded producer/consumer simulation
+benchmark.cpp         Google Benchmark harness with naive baseline

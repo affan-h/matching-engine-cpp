@@ -1,5 +1,8 @@
 CXX = g++
-CXXFLAGS = -O3 -march=native -std=c++17 -Iinclude -Wall -Wextra -DNDEBUG
+CXXFLAGS = -O3 -march=native -std=c++17 -Iinclude -I/usr/local/include -Wall -Wextra -DNDEBUG -lpthread
+
+# ADD this line for libraries specifically needed by the benchmark
+BENCH_LIBS = -L/usr/local/lib -lbenchmark -lpthread 
 
 SRC_DIR = src
 TEST_DIR = tests
@@ -19,8 +22,9 @@ $(ENGINE_TARGET):
 $(SIM_TARGET):
 	$(CXX) $(CXXFLAGS) $(TEST_DIR)/simulation.cpp $(CORE_SRC) -o $(SIM_TARGET)
 
+# UPDATE THIS BLOCK to include $(BENCH_LIBS) at the end 
 $(BENCH_TARGET):
-	$(CXX) $(CXXFLAGS) $(TEST_DIR)/benchmark.cpp $(CORE_SRC) -o $(BENCH_TARGET)
+	$(CXX) $(CXXFLAGS) $(TEST_DIR)/benchmark.cpp $(CORE_SRC) -o $(BENCH_TARGET) $(BENCH_LIBS)
 
 run: $(ENGINE_TARGET)
 	./$(ENGINE_TARGET) $(ARGS)

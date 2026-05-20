@@ -1,8 +1,6 @@
 #include <iostream>
 #include "orderbook.h"
 
-using namespace std;
-
 OrderBook::OrderBook()
 {
     bidLevels.resize(MAX_PRICE + 1, PriceLevel(0));
@@ -13,9 +11,9 @@ OrderBook::OrderBook()
     bidBitmap.resize(numWords, 0);
     askBitmap.resize(numWords, 0);
 
-    orderLookup.resize(2'000'000, nullptr);
     bidLevels.reserve(MAX_PRICE + 1);
     askLevels.reserve(MAX_PRICE + 1);
+    orderLookup.assign(10'000'000, nullptr);
 }
 
 inline void OrderBook::setBit(std::vector<uint64_t>& bitmap, int price)
@@ -154,10 +152,10 @@ void OrderBook::insertBid(const Order& order)
     level.tail = node;
 
     level.totalVolume += order.quantity;
-    if (order.id >= orderLookup.size())
+    if (order.id >= orderLookup.size()) {
         orderLookup.resize(order.id + 1, nullptr);
+    }
     orderLookup[order.id] = node;
-
     setBit(bidBitmap, order.price);
 }
 
@@ -187,10 +185,10 @@ void OrderBook::insertAsk(const Order& order)
     level.tail = node;
 
     level.totalVolume += order.quantity;
-    if (order.id >= orderLookup.size())
+    if (order.id >= orderLookup.size()) {
         orderLookup.resize(order.id + 1, nullptr);
+    }
     orderLookup[order.id] = node;
-
     setBit(askBitmap, order.price);
 }
 
@@ -244,6 +242,28 @@ void OrderBook::removeBestAsk()
     {
         clearBit(askBitmap, best);
     }
+}
+
+bool OrderBook::reduceOrderSize(OrderId id, Quantity newQty)
+{
+    if (id >= orderLookup.size() || orderLookup[id] == nullptr)
+        return false;
+
+    Order* node = orderLookup[id];
+    
+    if (newQty >= node->quantity) return false; // Only allowed for sizing down
+
+    Quantity diff = node->quantity - newQty;
+    node->quantity = newQty;
+
+    // Update level volume
+    if (node->side == Side::Buy) {
+        bidLevels[node->price].totalVolume -= diff;
+    } else {
+        askLevels[node->price].totalVolume -= diff;
+    }
+
+    return true;
 }
 
 void OrderBook::reduceBidVolume(Price price, Quantity qty)
@@ -327,7 +347,6 @@ void OrderBook::printBook() const
         {
             std::cout << p << " : " << askLevels[p].totalVolume << "\n";
         }
-
         p = findNextAsk(p + 1);
     }
 
@@ -340,7 +359,6 @@ void OrderBook::printBook() const
         {
             std::cout << p << " : " << bidLevels[p].totalVolume << "\n";
         }
-
         p = findNextBid(p - 1);
     }
 

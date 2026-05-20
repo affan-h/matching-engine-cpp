@@ -9,11 +9,19 @@ using OrderId = std::uint64_t;
 using Price   = int;
 using Quantity = int;
 using Timestamp = std::uint64_t;
+using InstrumentId = std::uint32_t;
 
 enum class Side
 {
     Buy,
     Sell
+};
+
+enum class TimeInForce : uint8_t
+{
+    GTC, // Good 'Til Canceled (Standard Limit)
+    IOC, // Immediate Or Cancel
+    FOK  // Fill Or Kill
 };
 
 struct Order
@@ -25,6 +33,7 @@ struct Order
     Quantity quantity;
 
     Timestamp timestamp;
+    TimeInForce tif;
 
     Order* prev = nullptr;
     Order* next = nullptr;
@@ -32,7 +41,7 @@ struct Order
 
 struct Trade
 {
-    std::string symbol;
+    InstrumentId instrument;
 
     OrderId buyOrderId;
     OrderId sellOrderId;

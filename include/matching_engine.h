@@ -8,43 +8,43 @@ class MatchingEngine
 {
 private:
 
-    std::unordered_map<std::string, OrderBook> books;
-
-    //Timestamp currentTimestamp = 0;
-    OrderId nextOrderId = 100000;
+    std::vector<OrderBook> books;
+    OrderId nextOrderId = 0;
     uint64_t nextTradeId = 0;
+    uint64_t totalTrades = 0;
 
 public:
 
     OrderId addLimitOrder(
-        const std::string& symbol,
+        InstrumentId instrument,
         Side side,
         Price price,
-        Quantity qty
+        Quantity qty,
+        TimeInForce tif
     );
 
     OrderId addMarketOrder(
-        const std::string& symbol,
+        InstrumentId instrument,
         Side side,
         Quantity qty
     );
 
     bool cancelOrder(
-        const std::string& symbol,
+        InstrumentId instrument,
         OrderId id
     );
 
     bool modifyOrder(
-        const std::string& symbol,
+        InstrumentId instrument,
         OrderId id,
         Price newPrice,
         Quantity newQty
     );
 
-    void printOrderBook(const std::string& symbol) const;
+    void printOrderBook(InstrumentId instrument) const;
 
     Trade createTrade(
-        const std::string& symbol,
+        InstrumentId instrument,
         const Order& incoming,
         const Order& resting,
         Quantity qty
@@ -52,7 +52,7 @@ public:
 
     void logTrade(const Trade& trade);
 
-    //void reportTrade(const Trade& trade);
+    uint64_t getTotalTrades() const { return totalTrades; }
 
     OrderId generateOrderId();
 };
