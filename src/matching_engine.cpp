@@ -3,7 +3,6 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
-using namespace std;
 
 inline Timestamp getCurrentTime()
 {
@@ -16,7 +15,7 @@ std::string formatTimestamp(Timestamp ts)
 {
     using namespace std::chrono;
 
-    auto sec = duration_cast<std::chrono::seconds>(microseconds(ts));
+    auto sec = duration_cast<std::chrono::seconds>(std::chrono::microseconds(ts));
     auto us  = ts % 1000000;
 
     std::time_t tt = sec.count();
@@ -30,19 +29,20 @@ std::string formatTimestamp(Timestamp ts)
 }
 
 Trade MatchingEngine::createTrade(
-    const string& symbol,
+    InstrumentId instrument,
     const Order& incoming,
     const Order& resting,
     Quantity qty)
 {
     Trade trade;
 
-    trade.symbol = symbol;
+    trade.instrument = instrument;
     trade.price = resting.price;
     trade.quantity = qty;
     trade.aggressorSide = incoming.side;
     trade.timestamp = getCurrentTime();
     trade.tradeId = ++nextTradeId;
+    ++totalTrades;
 
     if (incoming.side == Side::Buy)
     {
@@ -58,18 +58,18 @@ Trade MatchingEngine::createTrade(
     return trade;
 }
 
-void MatchingEngine::logTrade(const Trade& trade)
+void MatchingEngine::logTrade([[maybe_unused]] const Trade& trade)
 {
-    std::cout << "TRADE "
-              << trade.symbol
-              << " TID=" << trade.tradeId
-              << " TIME=" << formatTimestamp(trade.timestamp)
-              << " BUY=" << trade.buyOrderId
-              << " SELL=" << trade.sellOrderId
-              << " QTY=" << trade.quantity
-              << " PRICE=" << trade.price
-              << " AGG=" << (trade.aggressorSide == Side::Buy ? "BUY" : "SELL")
-              << "\n";
+    // std::cout << "TRADE "
+    //           << "INST=" << trade.instrument
+    //           << " TID=" << trade.tradeId
+    //           << " TIME=" << formatTimestamp(trade.timestamp)
+    //           << " BUY=" << trade.buyOrderId
+    //           << " SELL=" << trade.sellOrderId
+    //           << " QTY=" << trade.quantity
+    //           << " PRICE=" << trade.price
+    //           << " AGG=" << (trade.aggressorSide == Side::Buy ? "BUY" : "SELL")
+    //           << "\n";
 }
 
 OrderId MatchingEngine::generateOrderId()
@@ -78,12 +78,16 @@ OrderId MatchingEngine::generateOrderId()
 }
 
 OrderId MatchingEngine::addLimitOrder(
-    const std::string& symbol,
+    InstrumentId instrument,
     Side side,
     Price price,
-    Quantity qty)
+    Quantity qty,
+    TimeInForce tif = TimeInForce::GTC)
 {
-    OrderBook& book = books[symbol];
+    if (__builtin_expect(instrument >= books.size(), 0)) {
+        books.resize(instrument + 1);
+    }
+    OrderBook& book = books[instrument];
 
     OrderId id = generateOrderId();
 
@@ -92,65 +96,66 @@ OrderId MatchingEngine::addLimitOrder(
         side,
         price,
         qty,
-        getCurrentTime()
+        getCurrentTime(),
+        tif
     };
 
     if (side == Side::Buy)
+{
+    while (incoming.quantity > 0 &&
+           book.hasAsks() &&
+           incoming.price >= book.getBestAsk())
     {
-        while (incoming.quantity > 0 &&
-               book.hasAsks() &&
-               incoming.price >= book.getBestAsk())
-        {
-            Order& best = book.getBestAskOrder();
-
-            Quantity tradeQty = std::min(incoming.quantity, best.quantity);
-            
-            Trade trade = createTrade(symbol, incoming, best, tradeQty);
-            logTrade(trade);
-
-            incoming.quantity -= tradeQty;
-            best.quantity -= tradeQty;
-            book.reduceAskVolume(best.price, tradeQty);
-
-            if (best.quantity == 0)
-                book.removeBestAsk();
-        }
-
-        if (incoming.quantity > 0)
-            book.insertBid(incoming);
-    }else
-    {
-        while (incoming.quantity > 0 &&
-               book.hasBids() &&
-               incoming.price <= book.getBestBid())
-        {
-            Order& best = book.getBestBidOrder();
-
-            Quantity tradeQty = std::min(incoming.quantity, best.quantity);
-
-            Trade trade = createTrade(symbol, incoming, best, tradeQty);
-            logTrade(trade);
-
-            incoming.quantity -= tradeQty;
-            best.quantity -= tradeQty;
-            book.reduceBidVolume(best.price, tradeQty);
-
-            if (best.quantity == 0)
-                book.removeBestBid();
-        }
-
-        if (incoming.quantity > 0)
-            book.insertAsk(incoming);
+        Order& best = book.getBestAskOrder();
+        Quantity tradeQty = std::min(incoming.quantity, best.quantity);
+        Trade trade = createTrade(instrument, incoming, best, tradeQty);
+        logTrade(trade);
+        incoming.quantity -= tradeQty;
+        best.quantity -= tradeQty;
+        book.reduceAskVolume(best.price, tradeQty);
+        if (best.quantity == 0)
+            book.removeBestAsk();
     }
+
+    // GTC: rest in book. IOC: residual is silently discarded.
+    if (incoming.quantity > 0 && incoming.tif == TimeInForce::GTC) {
+        book.insertBid(incoming);
+    }
+
+} else
+{
+    while (incoming.quantity > 0 &&
+           book.hasBids() &&
+           incoming.price <= book.getBestBid())
+    {
+        Order& best = book.getBestBidOrder();
+        Quantity tradeQty = std::min(incoming.quantity, best.quantity);
+        Trade trade = createTrade(instrument, incoming, best, tradeQty);
+        logTrade(trade);
+        incoming.quantity -= tradeQty;
+        best.quantity -= tradeQty;
+        book.reduceBidVolume(best.price, tradeQty);
+        if (best.quantity == 0)
+            book.removeBestBid();
+    }
+
+    // GTC: rest in book. IOC: residual is silently discarded.
+    if (incoming.quantity > 0 && incoming.tif == TimeInForce::GTC) {
+        book.insertAsk(incoming);
+    }
+}
     return id;
 }
 
 OrderId MatchingEngine::addMarketOrder(
-    const std::string& symbol,
+    InstrumentId instrument,
     Side side,
     Quantity qty)
 {
-    OrderBook& book = books[symbol];
+    if (instrument >= books.size()) {
+        books.resize(instrument + 1);
+    }
+    OrderBook& book = books[instrument];
 
     OrderId id = generateOrderId();
 
@@ -159,7 +164,8 @@ OrderId MatchingEngine::addMarketOrder(
         side,
         0,
         qty,
-        getCurrentTime()
+        getCurrentTime(),
+        TimeInForce::IOC
     };
 
     if (side == Side::Buy)
@@ -170,7 +176,7 @@ OrderId MatchingEngine::addMarketOrder(
 
             Quantity tradeQty = std::min(incoming.quantity, best.quantity);
 
-            Trade trade = createTrade(symbol, incoming, best, tradeQty);
+            Trade trade = createTrade(instrument, incoming, best, tradeQty);
             logTrade(trade);
 
             incoming.quantity -= tradeQty;
@@ -189,7 +195,7 @@ OrderId MatchingEngine::addMarketOrder(
 
             Quantity tradeQty = std::min(incoming.quantity, best.quantity);
 
-            Trade trade = createTrade(symbol, incoming, best, tradeQty);
+            Trade trade = createTrade(instrument, incoming, best, tradeQty);
             logTrade(trade);
 
             incoming.quantity -= tradeQty;
@@ -204,47 +210,41 @@ OrderId MatchingEngine::addMarketOrder(
 }
 
 bool MatchingEngine::cancelOrder(
-    const std::string& symbol,
+    InstrumentId instrument,
     OrderId id)
 {
-    auto it = books.find(symbol);
-
-    if (it == books.end())
-        return false;
-
-    return it->second.cancelOrder(id);
+    // Fast bounds check instead of map lookup
+    if (instrument >= books.size()) return false; 
+    return books[instrument].cancelOrder(id);
 }
 
-bool MatchingEngine::modifyOrder(
-    const std::string& symbol,
-    OrderId id,
-    Price newPrice,
-    Quantity newQty)
+bool MatchingEngine::modifyOrder(InstrumentId instrument, OrderId id, Price newPrice, Quantity newQty)
 {
-    auto it = books.find(symbol);
-    if (it == books.end())
-        return false;
-
-    OrderBook& book = it->second;
+    if (instrument >= books.size()) return false;
+    OrderBook& book = books[instrument];
 
     Order oldOrder;
-    if (!book.getOrder(id, oldOrder))
-        return false;
+    if (!book.getOrder(id, oldOrder)) return false;
 
+    // IN-PLACE MODIFY: Same price, smaller quantity = keep queue position
+    if (newPrice == oldOrder.price && newQty < oldOrder.quantity)
+    {
+        return book.reduceOrderSize(id, newQty);
+    }
+
+    // Otherwise, lose priority: cancel and replace
     book.cancelOrder(id);
-
-    addLimitOrder(symbol, oldOrder.side, newPrice, newQty);
+    addLimitOrder(instrument, oldOrder.side, newPrice, newQty);
     return true;
 }
 
-void MatchingEngine::printOrderBook(const std::string& symbol) const
+void MatchingEngine::printOrderBook(InstrumentId instrument) const
 {
-    auto it = books.find(symbol);
-    if (it == books.end())
+    if (instrument >= books.size())
     {
-        std::cout << "No such symbol\n";
+        std::cout << "No such instrument\n";
         return;
     }
 
-    it->second.printBook();
+    books[instrument].printBook();
 }
