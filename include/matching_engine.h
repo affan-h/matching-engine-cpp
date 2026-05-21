@@ -33,6 +33,10 @@ public:
     {
         tradeSubscribers.push_back(std::move(cb));
     }
+    
+    bool symbolExists(const std::string& symbol) const {
+        return registry.exists(symbol);
+    }
 
     // New convenience overloads that accept symbol strings
     InstrumentId registerInstrument(const std::string& symbol) {
