@@ -77,6 +77,20 @@ OrderId MatchingEngine::generateOrderId()
     return ++nextOrderId;
 }
 
+void MatchingEngine::publishSnapshot(InstrumentId instrument)
+{
+    if (instrument >= books.size()) return;
+
+    std::vector<PriceLevelSnapshot> bids, asks;
+    books[instrument].getDepth(bids, asks, 5);
+
+    feed.publishSnapshot(
+        instrument,
+        registry.getSymbol(instrument),
+        bids,
+        asks);
+}
+
 OrderId MatchingEngine::addLimitOrder(
     InstrumentId instrument,
     Side side,
@@ -152,6 +166,8 @@ OrderId MatchingEngine::addLimitOrder(
         book.insertAsk(incoming);
     }
 }
+
+    publishSnapshot(instrument);
     return id;
 }
 
@@ -214,7 +230,9 @@ OrderId MatchingEngine::addMarketOrder(
                 book.removeBestBid();
         }
     }
-    return id;
+    
+    publishSnapshot(instrument);
+    return id;    
 }
 
 bool MatchingEngine::cancelOrder(
@@ -243,6 +261,7 @@ bool MatchingEngine::modifyOrder(InstrumentId instrument, OrderId id, Price newP
     // Otherwise, lose priority: cancel and replace
     book.cancelOrder(id);
     addLimitOrder(instrument, oldOrder.side, newPrice, newQty);
+    publishSnapshot(instrument);
     return true;
 }
 

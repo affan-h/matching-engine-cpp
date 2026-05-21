@@ -62,5 +62,11 @@ public:
     // Returns total fillable volume at or better than price, for FOK check
     Quantity getAvailableVolume(Side side, Price limitPrice) const;
 
+    // Capture top N price levels from each side
+    void getDepth(
+        std::vector<PriceLevelSnapshot>& bids,
+        std::vector<PriceLevelSnapshot>& asks,
+        int depth = 5) const;
+
     void printBook() const;
 };

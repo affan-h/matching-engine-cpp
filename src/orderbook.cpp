@@ -362,6 +362,43 @@ Quantity OrderBook::getAvailableVolume(Side side, Price limitPrice) const
     return total;
 }
 
+void OrderBook::getDepth(
+    std::vector<PriceLevelSnapshot>& bids,
+    std::vector<PriceLevelSnapshot>& asks,
+    int depth) const
+{
+    bids.clear();
+    asks.clear();
+
+    // Best bids — descending price
+    int p = findNextBid(MAX_PRICE);
+    while (p >= 0 && (int)bids.size() < depth)
+    {
+        if (bidLevels[p].head != nullptr)
+        {
+            int count = 0;
+            Order* node = bidLevels[p].head;
+            while (node) { ++count; node = node->next; }
+            bids.push_back({p, bidLevels[p].totalVolume, count});
+        }
+        p = findNextBid(p - 1);
+    }
+
+    // Best asks — ascending price
+    p = findNextAsk(0);
+    while (p <= MAX_PRICE && (int)asks.size() < depth)
+    {
+        if (askLevels[p].head != nullptr)
+        {
+            int count = 0;
+            Order* node = askLevels[p].head;
+            while (node) { ++count; node = node->next; }
+            asks.push_back({p, askLevels[p].totalVolume, count});
+        }
+        p = findNextAsk(p + 1);
+    }
+}
+
 void OrderBook::printBook() const
 {
     std::cout << "\n----- ORDER BOOK -----\n";

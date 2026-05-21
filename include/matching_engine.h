@@ -4,16 +4,25 @@
 #include <string>
 #include "orderbook.h"
 #include "symbol_registry.h"
+#include "market_data.h"
 
 class MatchingEngine {
 private:
     std::vector<OrderBook> books;
-    SymbolRegistry registry;
-    OrderId nextOrderId = 0;
+    SymbolRegistry         registry;
+    MarketDataFeed         feed;
+    OrderId  nextOrderId = 0;
     uint64_t nextTradeId = 0;
     uint64_t totalTrades = 0;
 
+    void publishSnapshot(InstrumentId instrument);
+
 public:
+    // Allow external code to subscribe to market data
+    void subscribeMarketData(SnapshotCallback cb) {
+        feed.subscribe(std::move(cb));
+    }
+
     // New convenience overloads that accept symbol strings
     InstrumentId registerInstrument(const std::string& symbol) {
         InstrumentId id = registry.registerSymbol(symbol);

@@ -54,3 +54,30 @@ struct Trade
     Timestamp timestamp;
     std::uint64_t tradeId; 
 };
+
+struct PriceLevelSnapshot {
+    Price    price;
+    Quantity volume;
+    int      orderCount;
+};
+
+struct L2Snapshot {
+    InstrumentId instrument;
+    std::string  symbol;
+    Timestamp    timestamp;
+
+    std::vector<PriceLevelSnapshot> bids; // best bid first
+    std::vector<PriceLevelSnapshot> asks; // best ask first
+
+    // Derived fields
+    Price bestBid()  const { return bids.empty() ? 0 : bids[0].price; }
+    Price bestAsk()  const { return asks.empty() ? 0 : asks[0].price; }
+    Price spread()   const {
+        if (bids.empty() || asks.empty()) return -1;
+        return asks[0].price - bids[0].price;
+    }
+    double midPrice() const {
+        if (bids.empty() || asks.empty()) return 0.0;
+        return (bids[0].price + asks[0].price) / 2.0;
+    }
+};

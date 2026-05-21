@@ -126,6 +126,20 @@ int main() {
 
     int total_orders = 5'000'000;
 
+    std::atomic<uint64_t> snapshotCount{0};
+
+    engine.subscribeMarketData([&](const L2Snapshot& snap) {
+        uint64_t n = ++snapshotCount;
+        if (n % 500000 == 0) {  // print every 500,000th snapshot
+            std::cout << "[Feed] " << snap.symbol
+                    << "  bid=" << snap.bestBid()
+                    << "  ask=" << snap.bestAsk()
+                    << "  spread=" << snap.spread()
+                    << "  mid="   << snap.midPrice()
+                    << "\n";
+        }
+    });
+
     auto start = high_resolution_clock::now();
     std::thread engine_thread(runMatchingEngine, std::ref(queue), std::ref(engine));
     simulateNetworkTraffic(queue, total_orders, AAPL, RELIANCE, INFY, TATASTEEL);
