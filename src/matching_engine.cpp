@@ -55,6 +55,11 @@ Trade MatchingEngine::createTrade(
         trade.sellOrderId = incoming.id;
     }
 
+    // Notify trade subscribers (e.g. stats tracker)
+    for (auto& cb : tradeSubscribers)
+        cb(instrument, registry.getSymbol(instrument),
+           trade.price, trade.quantity);
+
     return trade;
 }
 

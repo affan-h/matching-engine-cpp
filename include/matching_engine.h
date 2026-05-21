@@ -5,6 +5,7 @@
 #include "orderbook.h"
 #include "symbol_registry.h"
 #include "market_data.h"
+#include "stats_tracker.h"
 
 class MatchingEngine {
 private:
@@ -17,10 +18,20 @@ private:
 
     void publishSnapshot(InstrumentId instrument);
 
+    std::vector<std::function<void(InstrumentId, const std::string&,
+                                   Price, Quantity)>> tradeSubscribers;
+
 public:
     // Allow external code to subscribe to market data
     void subscribeMarketData(SnapshotCallback cb) {
         feed.subscribe(std::move(cb));
+    }
+
+    void subscribeTradeData(
+        std::function<void(InstrumentId, const std::string&,
+                           Price, Quantity)> cb)
+    {
+        tradeSubscribers.push_back(std::move(cb));
     }
 
     // New convenience overloads that accept symbol strings

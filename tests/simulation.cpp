@@ -5,6 +5,7 @@
 #include <chrono>
 #include "matching_engine.h"
 #include "spsc_queue.h"
+#include "stats_tracker.h"
 
 using namespace std;
 using namespace std::chrono;
@@ -126,18 +127,17 @@ int main() {
 
     int total_orders = 5'000'000;
 
-    std::atomic<uint64_t> snapshotCount{0};
+    StatsTracker tracker;
 
+    // Subscribe to market data for spread/price stats
     engine.subscribeMarketData([&](const L2Snapshot& snap) {
-        uint64_t n = ++snapshotCount;
-        if (n % 500000 == 0) {  // print every 500,000th snapshot
-            std::cout << "[Feed] " << snap.symbol
-                    << "  bid=" << snap.bestBid()
-                    << "  ask=" << snap.bestAsk()
-                    << "  spread=" << snap.spread()
-                    << "  mid="   << snap.midPrice()
-                    << "\n";
-        }
+        tracker.onSnapshot(snap);
+    });
+
+    // Subscribe to trade data for VWAP
+    engine.subscribeTradeData([&](InstrumentId id, const std::string& sym,
+                                Price px, Quantity qty) {
+        tracker.recordTrade(id, sym, px, qty);
     });
 
     auto start = high_resolution_clock::now();
@@ -158,6 +158,8 @@ int main() {
         cout << "===== Order Book: " << sym << " =====\n";
         engine.printOrderBook(engine.getInstrumentId(sym));
     }
+
+    tracker.printAll();
 
     return 0;
 }
