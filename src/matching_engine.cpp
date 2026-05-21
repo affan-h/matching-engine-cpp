@@ -100,6 +100,14 @@ OrderId MatchingEngine::addLimitOrder(
         tif
     };
 
+    // FOK: check full fill is possible before executing any trades
+    if (incoming.tif == TimeInForce::FOK)
+    {
+        Quantity available = book.getAvailableVolume(side, price);
+        if (available < incoming.quantity)
+            return id;  // Cannot fully fill — cancel entire order, no trades
+    }
+
     if (side == Side::Buy)
 {
     while (incoming.quantity > 0 &&

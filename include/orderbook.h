@@ -59,5 +59,8 @@ public:
     void reduceBidVolume(Price price, Quantity qty);
     void reduceAskVolume(Price price, Quantity qty);
 
+    // Returns total fillable volume at or better than price, for FOK check
+    Quantity getAvailableVolume(Side side, Price limitPrice) const;
+
     void printBook() const;
 };

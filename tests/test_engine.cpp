@@ -301,6 +301,60 @@ TEST(test_modify_size_down_keeps_priority) {
 }
 
 // ─────────────────────────────────────────────
+// Test: FOK — full fill available, executes
+// ─────────────────────────────────────────────
+TEST(test_fok_full_fill_executes) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    // Resting sell of qty 10
+    engine.addLimitOrder(inst, Side::Sell, 100, 10, TimeInForce::GTC);
+
+    // FOK buy of qty 10 — full fill available, should execute
+    uint64_t before = engine.getTotalTrades();
+    engine.addLimitOrder(inst, Side::Buy, 100, 10, TimeInForce::FOK);
+    ASSERT(engine.getTotalTrades() == before + 1,
+        "FOK should execute when full fill is available");
+}
+
+// ─────────────────────────────────────────────
+// Test: FOK — partial fill only, entire order cancelled
+// ─────────────────────────────────────────────
+TEST(test_fok_partial_fill_cancelled) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    // Only qty 5 available, FOK needs qty 10
+    engine.addLimitOrder(inst, Side::Sell, 100, 5, TimeInForce::GTC);
+
+    uint64_t before = engine.getTotalTrades();
+    engine.addLimitOrder(inst, Side::Buy, 100, 10, TimeInForce::FOK);
+
+    // No trades should have executed
+    ASSERT(engine.getTotalTrades() == before,
+        "FOK should not execute if full fill unavailable");
+
+    // The resting sell of qty 5 should still be intact
+    engine.addLimitOrder(inst, Side::Buy, 100, 5, TimeInForce::GTC);
+    ASSERT(engine.getTotalTrades() == before + 1,
+        "Resting sell should be untouched after FOK rejection");
+}
+
+// ─────────────────────────────────────────────
+// Test: FOK — no liquidity, cancelled
+// ─────────────────────────────────────────────
+TEST(test_fok_no_liquidity) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    uint64_t before = engine.getTotalTrades();
+    engine.addLimitOrder(inst, Side::Buy, 100, 10, TimeInForce::FOK);
+
+    ASSERT(engine.getTotalTrades() == before,
+        "FOK with no liquidity should produce no trades");
+}
+
+// ─────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────
 int main() {
@@ -321,6 +375,9 @@ int main() {
     RUN(test_multi_level_match);
     RUN(test_multi_instrument_isolation);
     RUN(test_modify_size_down_keeps_priority);
+    RUN(test_fok_full_fill_executes);
+    RUN(test_fok_partial_fill_cancelled);
+    RUN(test_fok_no_liquidity);
 
     std::cout << "\n======================================\n";
     std::cout << "Results: " << passed << " passed, "

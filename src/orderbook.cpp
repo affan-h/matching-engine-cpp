@@ -334,6 +334,34 @@ bool OrderBook::cancelOrder(OrderId id)
     return true;
 }
 
+Quantity OrderBook::getAvailableVolume(Side side, Price limitPrice) const
+{
+    Quantity total = 0;
+
+    if (side == Side::Buy)
+    {
+        // Buyer checks asks: all asks at price <= limitPrice
+        int p = findNextAsk(0);
+        while (p <= MAX_PRICE && p <= limitPrice)
+        {
+            total += askLevels[p].totalVolume;
+            p = findNextAsk(p + 1);
+        }
+    }
+    else
+    {
+        // Seller checks bids: all bids at price >= limitPrice
+        int p = findNextBid(MAX_PRICE);
+        while (p >= 0 && p >= limitPrice)
+        {
+            total += bidLevels[p].totalVolume;
+            p = findNextBid(p - 1);
+        }
+    }
+
+    return total;
+}
+
 void OrderBook::printBook() const
 {
     std::cout << "\n----- ORDER BOOK -----\n";
