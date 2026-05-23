@@ -19,7 +19,7 @@ private:
     void publishSnapshot(InstrumentId instrument);
 
     std::vector<std::function<void(InstrumentId, const std::string&,
-                                   Price, Quantity)>> tradeSubscribers;
+                                   Price, Quantity, Side)>> tradeSubscribers;
 
 public:
     // Allow external code to subscribe to market data
@@ -29,7 +29,7 @@ public:
 
     void subscribeTradeData(
         std::function<void(InstrumentId, const std::string&,
-                           Price, Quantity)> cb)
+                           Price, Quantity, Side)> cb)
     {
         tradeSubscribers.push_back(std::move(cb));
     }
@@ -52,6 +52,18 @@ public:
 
     const std::string& getSymbol(InstrumentId id) const {
         return registry.getSymbol(id);
+    }
+
+    bool getOrder(InstrumentId inst, OrderId id, Order& out) {
+        if (inst >= books.size()) return false;
+        return books[inst].getOrder(id, out);
+    }
+
+    void refreshSnapshot(InstrumentId inst) {
+        if (inst >= books.size()) return;
+        std::vector<PriceLevelSnapshot> bids, asks;
+        books[inst].getDepth(bids, asks, 10);
+        feed.publishSnapshot(inst, registry.getSymbol(inst), bids, asks);
     }
 
     OrderId addLimitOrder(
