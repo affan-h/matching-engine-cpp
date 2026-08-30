@@ -3,6 +3,8 @@ build/
 cli
 sim
 test
+test_wire
+test_wire_protocol
 bench
 *.out
 .DS_Store
