@@ -58,7 +58,7 @@ int main() {
         tracker.onSnapshot(snap);
     });
     engine.subscribeTradeData([&](InstrumentId id, const std::string& sym,
-                                   Price px, Quantity qty) {
+                                   Price px, Quantity qty, [[maybe_unused]] Side side) {
         tracker.recordTrade(id, sym, px, qty);
     });
 

@@ -58,7 +58,7 @@ Trade MatchingEngine::createTrade(
     // Notify trade subscribers (e.g. stats tracker)
     for (auto& cb : tradeSubscribers)
         cb(instrument, registry.getSymbol(instrument),
-           trade.price, trade.quantity);
+           trade.price, trade.quantity, trade.aggressorSide);
 
     return trade;
 }
