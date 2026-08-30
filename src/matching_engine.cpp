@@ -449,6 +449,13 @@ bool MatchingEngine::modifyOrder(
         return false;
     }
 
+    // Defensive parameter validation: reject invalid price or quantity WITHOUT cancelling old order
+    if (__builtin_expect(newPrice == 0 || newQty == 0 || newPrice > 100000, 0)) {
+        emitOrderState(id, client_order_id, instrument, oldOrder.side, newPrice, newQty, 0, 0,
+                       events::OrderStatus::Rejected, events::RejectCode::InvalidPriceQty, getCurrentTime());
+        return false;
+    }
+
     // IN-PLACE MODIFY: Same price, smaller quantity = keep queue position
     if (newPrice == oldOrder.price && newQty < oldOrder.quantity)
     {
@@ -466,7 +473,6 @@ bool MatchingEngine::modifyOrder(
     emitOrderState(id, client_order_id, instrument, oldOrder.side, oldOrder.price, oldOrder.quantity, 0, 0,
                    events::OrderStatus::Cancelled, events::RejectCode::None, getCurrentTime());
     addLimitOrder(instrument, oldOrder.side, newPrice, newQty, TimeInForce::GTC, client_order_id);
-    publishSnapshot(instrument);
     return true;
 }
 

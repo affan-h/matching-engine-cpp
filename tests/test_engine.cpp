@@ -412,6 +412,85 @@ TEST(test_cancel_nonexistent_order_rejection) {
 }
 
 // ─────────────────────────────────────────────
+// Test: OrderBook Bit 63 and Word Boundary Precision
+// ─────────────────────────────────────────────
+TEST(test_orderbook_bit_63_boundary) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    // Prices on bit 63 of word 0 (63), bit 0 of word 1 (64), bit 63 of word 1 (127), bit 0 of word 2 (128)
+    engine.addLimitOrder(inst, Side::Buy, 63, 10, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Buy, 64, 10, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Buy, 127, 10, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Buy, 128, 10, TimeInForce::GTC);
+
+    // Place matching sell orders from highest to lowest
+    uint64_t before = engine.getTotalTrades();
+    engine.addLimitOrder(inst, Side::Sell, 128, 10, TimeInForce::GTC);
+    ASSERT(engine.getTotalTrades() == before + 1, "Match at price 128");
+
+    engine.addLimitOrder(inst, Side::Sell, 127, 10, TimeInForce::GTC);
+    ASSERT(engine.getTotalTrades() == before + 2, "Match at price 127 (bit 63)");
+
+    engine.addLimitOrder(inst, Side::Sell, 64, 10, TimeInForce::GTC);
+    ASSERT(engine.getTotalTrades() == before + 3, "Match at price 64 (bit 0)");
+
+    engine.addLimitOrder(inst, Side::Sell, 63, 10, TimeInForce::GTC);
+    ASSERT(engine.getTotalTrades() == before + 4, "Match at price 63 (bit 63)");
+}
+
+// ─────────────────────────────────────────────
+// Test: Modify with Invalid Price/Qty Preserves Resting Order
+// ─────────────────────────────────────────────
+TEST(test_modify_invalid_price_qty_preserves_resting_order) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+    OutboundEventQueue queue(64);
+    engine.setOutboundQueue(&queue);
+
+    auto pop_order_state = [](OutboundEventQueue& q, events::OutboundEvent& out) {
+        while (q.pop(out)) {
+            if (out.type == events::OutboundEventType::OrderState) return true;
+        }
+        return false;
+    };
+
+    OrderId id = engine.addLimitOrder(inst, Side::Buy, 100, 10, TimeInForce::GTC, 501ULL);
+    events::OutboundEvent e_new;
+    ASSERT(pop_order_state(queue, e_new), "Expected New order event");
+    ASSERT(e_new.order.status == events::OrderStatus::New, "Status New");
+
+    // Modify with price 0 -> rejected
+    bool ok1 = engine.modifyOrder(inst, id, 0, 10, 502ULL);
+    ASSERT(!ok1, "Modify with price 0 must return false");
+    events::OutboundEvent e_rej1;
+    ASSERT(pop_order_state(queue, e_rej1), "Expected Rejection event");
+    ASSERT(e_rej1.order.status == events::OrderStatus::Rejected, "Status Rejected");
+    ASSERT(e_rej1.order.reject_code == events::RejectCode::InvalidPriceQty, "RejectCode InvalidPriceQty");
+
+    // Modify with qty 0 -> rejected
+    bool ok2 = engine.modifyOrder(inst, id, 100, 0, 503ULL);
+    ASSERT(!ok2, "Modify with qty 0 must return false");
+    events::OutboundEvent e_rej2;
+    ASSERT(pop_order_state(queue, e_rej2), "Expected Rejection event");
+    ASSERT(e_rej2.order.status == events::OrderStatus::Rejected, "Status Rejected");
+    ASSERT(e_rej2.order.reject_code == events::RejectCode::InvalidPriceQty, "RejectCode InvalidPriceQty");
+
+    // Modify with price > 100000 -> rejected
+    bool ok3 = engine.modifyOrder(inst, id, 100001, 10, 504ULL);
+    ASSERT(!ok3, "Modify with price > 100000 must return false");
+    events::OutboundEvent e_rej3;
+    ASSERT(pop_order_state(queue, e_rej3), "Expected Rejection event");
+    ASSERT(e_rej3.order.status == events::OrderStatus::Rejected, "Status Rejected");
+    ASSERT(e_rej3.order.reject_code == events::RejectCode::InvalidPriceQty, "RejectCode InvalidPriceQty");
+
+    // Verify original order at price 100 was NOT cancelled and still matches!
+    uint64_t before_trades = engine.getTotalTrades();
+    engine.addLimitOrder(inst, Side::Sell, 100, 10, TimeInForce::GTC, 505ULL);
+    ASSERT(engine.getTotalTrades() == before_trades + 1, "Resting order should still be intact and match");
+}
+
+// ─────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────
 int main() {
@@ -437,6 +516,8 @@ int main() {
     RUN(test_fok_no_liquidity);
     RUN(test_invalid_price_and_quantity_rejections);
     RUN(test_cancel_nonexistent_order_rejection);
+    RUN(test_orderbook_bit_63_boundary);
+    RUN(test_modify_invalid_price_qty_preserves_resting_order);
 
     std::cout << "\n======================================\n";
     std::cout << "Results: " << passed << " passed, "

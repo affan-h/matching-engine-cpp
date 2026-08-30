@@ -271,11 +271,22 @@ class GatewayTcpClient:
                     raise GatewayUnavailableError(f"Gateway connection lost during query: {e}")
 
     def check_health(self) -> bool:
-        """Actively checks if the TCP gateway is accepting connections."""
+        """Actively checks if the TCP gateway is accepting connections and responsive to heartbeats."""
         try:
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             probe.settimeout(0.5)
+            probe.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             probe.connect((self.host, self.port))
+            # Send ping frame (MessageType 0x05) to verify protocol responsiveness
+            ping_frame = encode_ping(12345)
+            probe.sendall(ping_frame)
+            hdr = probe.recv(3)
+            if len(hdr) == 3:
+                payload_len, msg_type = struct.unpack("!H B", hdr)
+                if msg_type == MessageType.PONG and payload_len == 8:
+                    payload = probe.recv(8)
+                    probe.close()
+                    return len(payload) == 8
             probe.close()
             return True
         except Exception:

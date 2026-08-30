@@ -169,10 +169,30 @@ void TcpGateway::closeClient(int fd) {
     }
 }
 
+static bool send_all_socket(int fd, const uint8_t* data, size_t size) {
+    size_t total_sent = 0;
+    while (total_sent < size) {
+        ssize_t n = send(fd, data + total_sent, size - total_sent, 0);
+        if (n > 0) {
+            total_sent += static_cast<size_t>(n);
+        } else if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::yield();
+                continue;
+            }
+            return false;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 void TcpGateway::handleSession(int fd, const SessionFrame& session) {
     if (session.type == wire::MessageType::Ping) {
         auto resp = wire::encode_pong(session.nonce);
-        send(fd, resp.data(), resp.size(), 0);
+        send_all_socket(fd, resp.data(), resp.size());
     }
     stats.session_frames_processed++;
 }
@@ -185,14 +205,14 @@ void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
             L2BookState book;
             read_model->getL2Book(query.instrument_id, book);
             auto resp = wire::encode_query_book_response(book);
-            send(fd, resp.data(), resp.size(), 0);
+            send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         case wire::MessageType::QueryTrades: {
             std::vector<TradeRecord> trades;
             read_model->getRecentTrades(query.instrument_id, query.limit, trades);
             auto resp = wire::encode_query_trades_response(query.instrument_id, trades);
-            send(fd, resp.data(), resp.size(), 0);
+            send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         case wire::MessageType::QueryOrder: {
@@ -204,14 +224,14 @@ void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
                 found = read_model->getOrder(query.order_id, order);
             }
             auto resp = wire::encode_query_order_response(found, order);
-            send(fd, resp.data(), resp.size(), 0);
+            send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         case wire::MessageType::QueryStats: {
             EngineMetrics metrics;
             read_model->getMetrics(metrics);
             auto resp = wire::encode_query_stats_response(metrics);
-            send(fd, resp.data(), resp.size(), 0);
+            send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         default:

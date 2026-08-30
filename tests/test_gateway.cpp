@@ -972,6 +972,50 @@ TEST(test_rapid_reconnect_burst) {
 }
 
 // ─────────────────────────────────────────────
+// 29. Deep Book Query Over TCP
+// ─────────────────────────────────────────────
+TEST(test_query_book_deep_levels_over_tcp) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    // Populate 10 bids and 10 asks in read model
+    events::OutboundEvent evt;
+    evt.type = events::OutboundEventType::L2Update;
+    evt.l2.instrument_id = aapl;
+    evt.l2.timestamp = 1700000000;
+    evt.l2.sequence = 100;
+    evt.l2.bid_count = 10;
+    evt.l2.ask_count = 10;
+    for (int i = 0; i < 10; ++i) {
+        evt.l2.bids[i] = {100 - i, static_cast<Quantity>((i + 1) * 10)};
+        evt.l2.asks[i] = {101 + i, static_cast<Quantity>((i + 1) * 10)};
+    }
+    read_model.applyEvent(evt);
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+    auto req = wire::encode_query_book(aapl);
+    send_all(client, req);
+
+    auto [type, payload] = recv_response(client);
+    ASSERT(type == wire::MessageType::QueryBookResponse, "Expected QueryBookResponse");
+    ASSERT(payload.size() == (4 + 8 + 8 + 1 + 1 + (10 + 10) * 8), "Expected payload length for 10 bids and 10 asks");
+    ASSERT(payload[20] == 10, "10 bids");
+    ASSERT(payload[21] == 10, "10 asks");
+
+    close(client);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -1006,6 +1050,7 @@ int main() {
     RUN(test_shutdown_with_pending_queued_commands);
     RUN(test_shutdown_idempotency);
     RUN(test_rapid_reconnect_burst);
+    RUN(test_query_book_deep_levels_over_tcp);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

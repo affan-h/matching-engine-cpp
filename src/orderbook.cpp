@@ -72,8 +72,9 @@ inline int OrderBook::findNextBid(int fromPrice) const
     int word = fromPrice / 64;
     int bit  = fromPrice % 64;
 
-    // Mask current word (ignore higher bits)
-    uint64_t w = bidBitmap[word] & ((1ULL << (bit + 1)) - 1);
+    // Mask current word (ignore higher bits). Protect against 1ULL << 64 UB when bit == 63.
+    uint64_t mask = (bit == 63) ? ~0ULL : ((1ULL << (bit + 1)) - 1);
+    uint64_t w = bidBitmap[word] & mask;
 
     if (w != 0)
     {
@@ -432,7 +433,7 @@ void OrderBook::printBook() const
 
 bool OrderBook::getOrder(OrderId id, Order& outOrder)
 {
-    if (id < 0 || id >= (OrderId)orderLookup.size())
+    if (id >= orderLookup.size())
         return false;
 
     if (orderLookup[id] == nullptr)
