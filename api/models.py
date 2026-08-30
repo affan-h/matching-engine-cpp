@@ -109,9 +109,40 @@ class PriceLevelItem(BaseModel):
 class OrderBookResponse(BaseModel):
     symbol: str
     instrument_id: int
+    sequence: int = 0
+    timestamp: int = 0
     bids: List[PriceLevelItem] = Field(default_factory=list)
     asks: List[PriceLevelItem] = Field(default_factory=list)
-    timestamp: float = Field(default_factory=time.time)
+
+
+class TradeItem(BaseModel):
+    trade_id: int
+    symbol: Optional[str] = None
+    buy_order_id: int
+    sell_order_id: int
+    price: int
+    quantity: int
+    aggressor_side: str
+    timestamp: int
+
+
+class TradesResponse(BaseModel):
+    symbol: str
+    instrument_id: int
+    trades: List[TradeItem] = Field(default_factory=list)
+
+
+class OrderStateResponse(BaseModel):
+    order_id: int
+    symbol: str
+    instrument_id: int
+    side: str
+    price: int
+    original_quantity: int
+    remaining_quantity: int
+    filled_quantity: int
+    status: str
+    timestamp: int
 
 
 class GatewayStatus(BaseModel):

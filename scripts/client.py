@@ -8,6 +8,12 @@ Implements the explicit big-endian wire protocol:
     - 0x02 New Market Order (9 bytes payload)
     - 0x03 Cancel Order     (12 bytes payload)
     - 0x04 Modify Order     (20 bytes payload)
+    - 0x10 Query Book       (4 bytes payload)
+    - 0x11 Query Trades     (8 bytes payload)
+    - 0x12 Query Order      (8 bytes payload)
+    - 0x80 Query Book Resp
+    - 0x81 Query Trades Resp
+    - 0x82 Query Order Resp
 """
 
 import sys
@@ -15,13 +21,23 @@ import socket
 import struct
 import time
 from enum import IntEnum
+from typing import Dict, Any, List, Optional
 
 
 class MessageType(IntEnum):
-    NEW_LIMIT_ORDER = 0x01
-    NEW_MARKET_ORDER = 0x02
-    CANCEL_ORDER = 0x03
-    MODIFY_ORDER = 0x04
+    NEW_LIMIT_ORDER     = 0x01
+    NEW_MARKET_ORDER    = 0x02
+    CANCEL_ORDER        = 0x03
+    MODIFY_ORDER        = 0x04
+
+    QUERY_BOOK          = 0x10
+    QUERY_TRADES        = 0x11
+    QUERY_ORDER         = 0x12
+
+    QUERY_BOOK_RESP     = 0x80
+    QUERY_TRADES_RESP   = 0x81
+    QUERY_ORDER_RESP    = 0x82
+    QUERY_ERROR_RESP    = 0x8F
 
 
 class Side(IntEnum):
@@ -33,6 +49,14 @@ class TimeInForce(IntEnum):
     GTC = 0
     IOC = 1
     FOK = 2
+
+
+class OrderStatus(IntEnum):
+    NEW              = 1
+    PARTIALLY_FILLED = 2
+    FILLED           = 3
+    CANCELLED        = 4
+    REJECTED         = 5
 
 
 def encode_limit_order(
@@ -81,13 +105,113 @@ def encode_modify_order(
     return struct.pack("!H B I Q I I", payload_len, msg_type, instrument_id, order_id, new_price, new_quantity)
 
 
+def encode_query_book(instrument_id: int) -> bytes:
+    """Encodes a Query Book frame (7 bytes total)."""
+    payload_len = 4
+    msg_type = MessageType.QUERY_BOOK
+    return struct.pack("!H B I", payload_len, msg_type, instrument_id)
+
+
+def encode_query_trades(instrument_id: int, limit: int = 50) -> bytes:
+    """Encodes a Query Trades frame (11 bytes total)."""
+    payload_len = 8
+    msg_type = MessageType.QUERY_TRADES
+    return struct.pack("!H B I I", payload_len, msg_type, instrument_id, limit)
+
+
+def encode_query_order(order_id: int) -> bytes:
+    """Encodes a Query Order frame (11 bytes total)."""
+    payload_len = 8
+    msg_type = MessageType.QUERY_ORDER
+    return struct.pack("!H B Q", payload_len, msg_type, order_id)
+
+
+def decode_query_book_response(payload: bytes) -> Dict[str, Any]:
+    """Decodes a QueryBookResponse payload."""
+    inst_id, seq, ts, b_count, a_count = struct.unpack_from("!I Q Q B B", payload, 0)
+    offset = 22
+
+    bids: List[Dict[str, int]] = []
+    for _ in range(b_count):
+        px, qty = struct.unpack_from("!I I", payload, offset)
+        bids.append({"price": px, "quantity": qty})
+        offset += 8
+
+    asks: List[Dict[str, int]] = []
+    for _ in range(a_count):
+        px, qty = struct.unpack_from("!I I", payload, offset)
+        asks.append({"price": px, "quantity": qty})
+        offset += 8
+
+    return {
+        "instrument_id": inst_id,
+        "sequence": seq,
+        "timestamp": ts,
+        "bids": bids,
+        "asks": asks,
+    }
+
+
+def decode_query_trades_response(payload: bytes) -> Dict[str, Any]:
+    """Decodes a QueryTradesResponse payload."""
+    inst_id, count = struct.unpack_from("!I H", payload, 0)
+    offset = 6
+
+    trades: List[Dict[str, Any]] = []
+    for _ in range(count):
+        tid, buy_id, sell_id, px, qty, side_raw, ts = struct.unpack_from("!Q Q Q I I B Q", payload, offset)
+        trades.append({
+            "trade_id": tid,
+            "buy_order_id": buy_id,
+            "sell_order_id": sell_id,
+            "price": px,
+            "quantity": qty,
+            "aggressor_side": "buy" if side_raw == 0 else "sell",
+            "timestamp": ts,
+        })
+        offset += 41
+
+    return {
+        "instrument_id": inst_id,
+        "trades": trades,
+    }
+
+
+def decode_query_order_response(payload: bytes) -> Optional[Dict[str, Any]]:
+    """Decodes a QueryOrderResponse payload."""
+    found, oid, inst_id, side_raw, px, orig_qty, rem_qty, filled_qty, status_raw, ts = struct.unpack_from("!B Q I B I I I I B Q", payload, 0)
+    if not found:
+        return None
+
+    status_map = {
+        1: "NEW",
+        2: "PARTIALLY_FILLED",
+        3: "FILLED",
+        4: "CANCELLED",
+        5: "REJECTED"
+    }
+
+    return {
+        "found": True,
+        "order_id": oid,
+        "instrument_id": inst_id,
+        "side": "buy" if side_raw == 0 else "sell",
+        "price": px,
+        "original_quantity": orig_qty,
+        "remaining_quantity": rem_qty,
+        "filled_quantity": filled_qty,
+        "status": status_map.get(status_raw, "UNKNOWN"),
+        "timestamp": ts,
+    }
+
+
 class ExchangeClient:
-    """Client for connecting and sending binary orders to the TCP Gateway."""
+    """Client for connecting and sending binary orders/queries to the TCP Gateway."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 12345):
         self.host = host
         self.port = port
-        self.sock = None
+        self.sock: Optional[socket.socket] = None
 
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -109,50 +233,43 @@ class ExchangeClient:
         frame = encode_modify_order(instrument_id, order_id, new_price, new_quantity)
         self.sock.sendall(frame)
 
+    def _read_exact(self, n: int) -> bytes:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionResetError("Gateway closed connection while reading")
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _read_response_frame(self) -> tuple[int, bytes]:
+        hdr = self._read_exact(3)
+        payload_len, msg_type = struct.unpack("!H B", hdr)
+        payload = self._read_exact(payload_len)
+        return msg_type, payload
+
+    def query_book(self, instrument_id: int) -> Dict[str, Any]:
+        frame = encode_query_book(instrument_id)
+        self.sock.sendall(frame)
+        msg_type, payload = self._read_response_frame()
+        assert msg_type == MessageType.QUERY_BOOK_RESP
+        return decode_query_book_response(payload)
+
+    def query_trades(self, instrument_id: int, limit: int = 50) -> Dict[str, Any]:
+        frame = encode_query_trades(instrument_id, limit)
+        self.sock.sendall(frame)
+        msg_type, payload = self._read_response_frame()
+        assert msg_type == MessageType.QUERY_TRADES_RESP
+        return decode_query_trades_response(payload)
+
+    def query_order(self, order_id: int) -> Optional[Dict[str, Any]]:
+        frame = encode_query_order(order_id)
+        self.sock.sendall(frame)
+        msg_type, payload = self._read_response_frame()
+        assert msg_type == MessageType.QUERY_ORDER_RESP
+        return decode_query_order_response(payload)
+
     def close(self):
         if self.sock:
             self.sock.close()
             self.sock = None
-
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--demo":
-        port = int(sys.argv[2]) if len(sys.argv) > 2 else 12345
-        print(f"[Python Client] Connecting to TCP Gateway at 127.0.0.1:{port}...")
-        client = ExchangeClient(port=port)
-        client.connect()
-
-        print("[Python Client] Sending resting Buy Limit: AAPL (0) @ $150, qty 10...")
-        client.send_limit_order(0, Side.BUY, 150, 10, TimeInForce.GTC)
-        time.sleep(0.1)
-
-        print("[Python Client] Sending matching Sell Limit: AAPL (0) @ $150, qty 10...")
-        client.send_limit_order(0, Side.SELL, 150, 10, TimeInForce.GTC)
-        time.sleep(0.1)
-
-        print("[Python Client] Sending Market Order: INFY (2) SELL, qty 50...")
-        client.send_market_order(2, Side.SELL, 50)
-        time.sleep(0.1)
-
-        print("[Python Client] Closing connection.")
-        client.close()
-        print("[Python Client] Demo completed successfully.")
-    else:
-        # Self-test encoding
-        limit_frame = encode_limit_order(1, Side.BUY, 100, 10, TimeInForce.GTC)
-        print(f"Limit order frame ({len(limit_frame)} bytes): {limit_frame.hex()}")
-        assert len(limit_frame) == 17
-
-        market_frame = encode_market_order(1, Side.SELL, 5)
-        print(f"Market order frame ({len(market_frame)} bytes): {market_frame.hex()}")
-        assert len(market_frame) == 12
-
-        cancel_frame = encode_cancel_order(1, 42)
-        print(f"Cancel order frame ({len(cancel_frame)} bytes): {cancel_frame.hex()}")
-        assert len(cancel_frame) == 15
-
-        modify_frame = encode_modify_order(1, 42, 105, 8)
-        print(f"Modify order frame ({len(modify_frame)} bytes): {modify_frame.hex()}")
-        assert len(modify_frame) == 23
-
-        print("All python encoder self-tests passed!")

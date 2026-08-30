@@ -11,6 +11,10 @@ from api.models import (
     CancelResponse,
     ModifyResponse,
     OrderBookResponse,
+    PriceLevelItem,
+    TradeItem,
+    TradesResponse,
+    OrderStateResponse,
     HealthResponse,
     GatewayStatus,
     OrderTypeEnum,
@@ -48,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Matching Engine HTTP REST API",
-    description="Client-facing HTTP adapter communicating with the C++ kqueue Matching Engine Gateway via explicit binary wire protocol.",
+    description="Client-facing HTTP adapter communicating with the C++ kqueue Matching Engine Gateway & Read Model via explicit binary wire protocol.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -83,7 +87,7 @@ async def value_error_handler(request, exc: ValueError):
 
 
 # ─────────────────────────────────────────────
-# REST Endpoints
+# Command Plane REST Endpoints (Ingress)
 # ─────────────────────────────────────────────
 
 @app.post(
@@ -197,14 +201,19 @@ def modify_order(
     )
 
 
+# ─────────────────────────────────────────────
+# Query Plane REST Endpoints (Read Model)
+# ─────────────────────────────────────────────
+
 @app.get(
     "/book/{symbol}",
     response_model=OrderBookResponse,
     status_code=status.HTTP_200_OK,
-    summary="Get Order Book Depth for Symbol",
+    summary="Get Order Book Depth Snapshot for Symbol from Read Model",
 )
 def get_order_book(
     symbol: str = Path(..., description="Instrument symbol (AAPL, RELIANCE, INFY, TATASTEEL)"),
+    gateway: GatewayTcpClient = Depends(get_gateway_client),
 ):
     symbol_upper = symbol.strip().upper()
     if symbol_upper not in SYMBOL_MAP:
@@ -214,13 +223,61 @@ def get_order_book(
             detail=f"Symbol '{symbol}' not found. Supported symbols: {valid_symbols}",
         )
 
-    inst_id = SYMBOL_MAP[symbol_upper]
+    book_data = gateway.query_book(symbol_upper)
     return OrderBookResponse(
         symbol=symbol_upper,
-        instrument_id=inst_id,
-        bids=[],
-        asks=[],
+        instrument_id=book_data["instrument_id"],
+        sequence=book_data.get("sequence", 0),
+        timestamp=book_data.get("timestamp", 0),
+        bids=[PriceLevelItem(**b) for b in book_data.get("bids", [])],
+        asks=[PriceLevelItem(**a) for a in book_data.get("asks", [])],
     )
+
+
+@app.get(
+    "/trades/{symbol}",
+    response_model=TradesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Recent Trade History for Symbol from Read Model",
+)
+def get_trades(
+    symbol: str = Path(..., description="Instrument symbol (AAPL, RELIANCE, INFY, TATASTEEL)"),
+    limit: int = Query(50, ge=1, le=100, description="Max number of recent trades to return (1..100)"),
+    gateway: GatewayTcpClient = Depends(get_gateway_client),
+):
+    symbol_upper = symbol.strip().upper()
+    if symbol_upper not in SYMBOL_MAP:
+        valid_symbols = ", ".join(SYMBOL_MAP.keys())
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Symbol '{symbol}' not found. Supported symbols: {valid_symbols}",
+        )
+
+    trades_data = gateway.query_trades(symbol_upper, limit=limit)
+    return TradesResponse(
+        symbol=symbol_upper,
+        instrument_id=SYMBOL_MAP[symbol_upper],
+        trades=[TradeItem(**t) for t in trades_data],
+    )
+
+
+@app.get(
+    "/orders/{order_id}",
+    response_model=OrderStateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Order Status and Fill History from Read Model",
+)
+def get_order(
+    order_id: int = Path(..., ge=1, description="Order ID to query (>= 1)"),
+    gateway: GatewayTcpClient = Depends(get_gateway_client),
+):
+    order_data = gateway.query_order(order_id)
+    if order_data is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Order {order_id} not found in read model",
+        )
+    return OrderStateResponse(**order_data)
 
 
 @app.get(

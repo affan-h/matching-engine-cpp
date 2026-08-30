@@ -6,6 +6,8 @@
 #include "spsc_queue.h"
 #include "stats_tracker.h"
 #include "tcp_gateway.h"
+#include "read_model.h"
+#include "projector.h"
 
 static std::atomic<bool> g_shutdown{false};
 
@@ -23,22 +25,38 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, handle_signal);
 
     std::cout << "========================================\n";
-    std::cout << "     Matching Engine TCP Gateway        \n";
+    std::cout << "  Matching Engine Gateway & Read Model  \n";
     std::cout << "========================================\n\n";
 
     MatchingEngine engine;
+    ReadModel read_model(10000, 1000);
 
-    // Register standard initial instruments
+    // Register standard initial instruments in Engine and ReadModel
     InstrumentId aapl      = engine.registerInstrument("AAPL");
     InstrumentId reliance  = engine.registerInstrument("RELIANCE");
     InstrumentId infy      = engine.registerInstrument("INFY");
     InstrumentId tatasteel = engine.registerInstrument("TATASTEEL");
+
+    read_model.registerSymbol(aapl, "AAPL");
+    read_model.registerSymbol(reliance, "RELIANCE");
+    read_model.registerSymbol(infy, "INFY");
+    read_model.registerSymbol(tatasteel, "TATASTEEL");
 
     std::cout << "[Instruments Registered]\n";
     std::cout << "  ID " << aapl << ": AAPL\n";
     std::cout << "  ID " << reliance << ": RELIANCE\n";
     std::cout << "  ID " << infy << ": INFY\n";
     std::cout << "  ID " << tatasteel << ": TATASTEEL\n\n";
+
+    // Setup Outbound SPSC Queue and Projector
+    OutboundEventQueue outbound_queue(65536);
+    engine.setOutboundQueue(&outbound_queue);
+
+    Projector projector(outbound_queue, read_model);
+    if (!projector.start()) {
+        std::cerr << "[Fatal] Failed to start Read Model Projector\n";
+        return 1;
+    }
 
     StatsTracker tracker;
     engine.subscribeMarketData([&](const L2Snapshot& snap) {
@@ -54,8 +72,8 @@ int main(int argc, char* argv[]) {
                   << "\n";
     });
 
-    // 64K slot lock-free SPSC queue
-    SPSCQueue queue(65536);
+    // 64K slot lock-free SPSC command queue
+    SPSCQueue command_queue(65536);
 
     GatewayConfig config;
     config.host = "127.0.0.1";
@@ -63,7 +81,7 @@ int main(int argc, char* argv[]) {
     config.max_client_buffer = 16384;
     config.max_backpressure_retries = 1000;
 
-    TcpGateway gateway(engine, queue, config);
+    TcpGateway gateway(engine, command_queue, config, &read_model);
 
     if (!gateway.start()) {
         std::cerr << "[Fatal] Failed to start TCP Gateway on " << config.host << ":" << port << "\n";
@@ -71,7 +89,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "[Gateway Started] Listening on " << config.host << ":" << gateway.getBoundPort() << "\n";
-    std::cout << "Ready for incoming client connections. Press Ctrl+C to stop.\n\n";
+    std::cout << "Ready for incoming client connections (Commands & Queries). Press Ctrl+C to stop.\n\n";
 
     while (!g_shutdown.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -79,13 +97,21 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n[Gateway] Shutting down gracefully...\n";
     gateway.stop();
+    projector.stop();
 
     const auto& stats = gateway.getStats();
-    std::cout << "\n===== Gateway Statistics =====\n";
+    const auto& proj_stats = projector.getStats();
+
+    std::cout << "\n===== Gateway & Read Model Statistics =====\n";
     std::cout << "Connections accepted : " << stats.connections_accepted.load() << "\n";
     std::cout << "Connections closed   : " << stats.connections_closed.load() << "\n";
-    std::cout << "Events pushed        : " << stats.events_pushed.load() << "\n";
-    std::cout << "Events processed     : " << stats.events_processed.load() << "\n";
+    std::cout << "Commands pushed      : " << stats.events_pushed.load() << "\n";
+    std::cout << "Commands processed   : " << stats.events_processed.load() << "\n";
+    std::cout << "Queries processed    : " << stats.queries_processed.load() << "\n";
+    std::cout << "Events projected     : " << proj_stats.events_projected.load() << "\n";
+    std::cout << "Trades projected     : " << proj_stats.trades_projected.load() << "\n";
+    std::cout << "L2 updates projected : " << proj_stats.l2_updates_projected.load() << "\n";
+    std::cout << "Order states proj.   : " << proj_stats.order_states_projected.load() << "\n";
     std::cout << "Malformed frames     : " << stats.malformed_frames.load() << "\n";
     std::cout << "Buffer overflows     : " << stats.buffer_overflows.load() << "\n";
     std::cout << "Queue drops          : " << stats.queue_full_drops.load() << "\n";

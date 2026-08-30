@@ -1,6 +1,6 @@
 # Limit Order Book Matching Engine (C++)
 
-A high-performance limit order book matching engine, non-blocking TCP gateway, and client-facing Python REST API implemented in C++ and Python, modeled after the core infrastructure used in electronic trading systems. Built with a focus on deterministic latency, cache-efficient data structures, lock-free thread boundaries, event-driven network I/O, and clean API separation.
+A high-performance limit order book matching engine, non-blocking TCP gateway, in-memory read model / projector query plane, and client-facing Python REST API implemented in C++ and Python, modeled after the core infrastructure used in electronic trading systems. Built with a focus on deterministic latency, cache-efficient data structures, lock-free thread boundaries, event-driven network I/O, CQRS command/query plane separation, and clean API isolation.
 
 ---
 
@@ -56,76 +56,90 @@ AAPL:
 
 ## What It Does
 
-When two traders place opposing orders at compatible prices, a matching engine pairs them and generates a trade. This project implements that system end-to-end — the data structures, matching logic, memory management, lock-free concurrency layer, non-blocking TCP network gateway, client-facing HTTP REST API, market data feed, and a live terminal dashboard for interacting with the engine in real time.
+When two traders place opposing orders at compatible prices, a matching engine pairs them and generates a trade. This project implements that system end-to-end — the data structures, matching logic, memory management, lock-free concurrency layer, non-blocking TCP network gateway, event projection pipeline, in-memory read model, client-facing HTTP REST API, market data feed, and a live terminal dashboard for interacting with the engine in real time.
 
 ---
 
-## Architecture
+## Architecture (Command & Query Plane Separation)
 
 ```
-+------------------------------------------------------------------------------+
-|                  HTTP REST CLIENTS (Web / Python / curl)                     |
-+------------------------------------------------------------------------------+
-                                      │
-                                      │ HTTP / JSON
-                                      ▼
-+------------------------------------------------------------------------------+
-|                   PYTHON API SERVICE (FastAPI / Pydantic)                    |
-|                                                                              |
-|  - Request validation: symbols, price ranges, quantities, side, TIF          |
-|  - REST endpoints: POST /orders, DELETE /orders, PATCH /orders, GET /book    |
-|  - Active gateway probe: GET /health                                         |
-|  - Thread-safe binary TCP client with automatic reconnect & framing          |
-+------------------------------------------------------------------------------+
-                                      │
-                                      │ Binary TCP Frames (Big-Endian Wire Protocol)
-                                      ▼
-+------------------------------------------------------------------------------+
-|                  C++ TCP GATEWAY (Producer Thread - kqueue)                  |
-|                                                                              |
-|  - Non-blocking listening & client sockets via fcntl                         |
-|  - Event-driven I/O multiplexing with macOS kqueue                           |
-|  - Per-connection independent stream buffer & TcpParser state                |
-|  - Deserialization & validation: framing, payload bounds, field ranges       |
-|  - Bounded backpressure handling (bounded retries, connection protection)    |
-+------------------------------------------------------------------------------+
-                                      │
-                                      │ Validated OrderEvent Structs
-                                      ▼
-+------------------------------------------------------------------------------+
-|                   SPSC RING BUFFER (Lock-Free Thread Boundary)               |
-|                       64K/1M slots, cacheline-aligned                        |
-+------------------------------------------------------------------------------+
-                                      │
-                                      │ pop()
-                                      ▼
-+------------------------------------------------------------------------------+
-|                MATCHING ENGINE CORE (Consumer Thread - Single Core)          |
-|                                                                              |
-|  - Strict single-threaded execution (zero mutexes / zero lock contention)   |
-|  - Integer InstrumentId routing (AAPL, RELIANCE, INFY, TATASTEEL)            |
-|  - Price Ladder: direct-indexed vector (O(1) price levels)                   |
-|  - Bitmaps: __builtin_clzll / __builtin_ctzll for instantaneous best bid/ask |
-|  - Intrusive doubly linked list: cacheline-local order queuing               |
-|  - Memory Pool Allocator: pre-warmed free-list (zero heap allocations)       |
-|  - O(1) Cancel via direct index array orderLookup[id]                        |
-+------------------------------------------------------------------------------+
-                                      │
-                                      │ Trade & Snapshot Callbacks
-                                      ▼
-+------------------------------------------------------------------------------+
-|                         DOWNSTREAM CONSUMERS & FEEDS                         |
-|  - MarketDataFeed (L2 Snapshots)                                             |
-|  - StatsTracker (Real-time VWAP, turnover, spread, and volume tracking)      |
-|  - Live Dashboard / Console Visualizers                                      |
-+------------------------------------------------------------------------------+
+                              COMMAND PLANE (Ingress)
++-----------------------------------------------------------------------------------------+
+|                        HTTP CLIENTS (Web / Python / curl)                               |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ POST /orders, DELETE /orders, PATCH /orders
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                         PYTHON API SERVICE (FastAPI / Pydantic)                         |
+|  - Request validation: symbols, price ranges, quantities, side, TIF                     |
+|  - Thread-safe binary TCP client with automatic reconnect & frame serialization         |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ Binary TCP Frames (0x01..0x04)
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                        C++ TCP GATEWAY (macOS kqueue Event Loop)                        |
+|  - Non-blocking listening & client sockets (O_NONBLOCK via fcntl)                       |
+|  - Incremental stream parsing (TcpParser) & per-connection state buffers                |
+|  - Bounded backpressure handling and saturation protection                              |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ OrderEvent Structs
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                  COMMAND SPSC RING BUFFER (Lock-Free Thread Boundary)                   |
+|                             64K slots, cacheline-aligned                                |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ pop()
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                   MATCHING ENGINE CORE (Dedicated Single Thread - Hot Path)             |
+|  - Zero mutexes / zero locks / zero heap allocations on execution hot path              |
+|  - Price Ladder: direct-indexed vector (O(1) price levels)                              |
+|  - Bitmaps: __builtin_clzll / __builtin_ctzll for instantaneous best bid/ask            |
+|  - Intrusive doubly linked list & pre-warmed memory pool allocator                      |
+|  - Emits fixed-size POD outbound events (Trade, L2Update, OrderState)                   |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ Fixed-size POD OutboundEvent
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                  OUTBOUND SPSC RING BUFFER (Lock-Free Thread Boundary)                  |
+|          64K slots, acquire/release ordering, backpressure & L2 coalescing              |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ pop()
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                    READ MODEL PROJECTOR (Dedicated Consumer Thread)                     |
+|  - Continuously drains outbound event queue                                             |
+|  - Applies events to in-memory ReadModel under write lock                               |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ update
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                         READ MODEL / QUERY PLANE (In-Memory)                            |
+|                                                                                         |
+|  - L2 Book Snapshots: latest top 10 bids/asks per instrument + sequence version         |
+|  - Bounded Trade History: fixed circular buffer (1000 trades/symbol, FIFO eviction)     |
+|  - Bounded Order History: tracked order states (10,000 orders, FIFO eviction)           |
+|  - Query Synchronization: std::shared_mutex (concurrent multi-reader access)            |
++-----------------------------------------------------------------------------------------+
+                                           │
+                                           │ std::shared_lock (Cold Query Path)
+                                           ▼
++-----------------------------------------------------------------------------------------+
+|                 QUERY PLANE REST ENDPOINTS (FastAPI GET /book, /trades, /orders)        |
++-----------------------------------------------------------------------------------------+
 ```
 
-The system is partitioned into clear architectural boundaries:
-1. **HTTP / REST Layer**: High-level validation and client integration via FastAPI.
-2. **TCP Gateway Layer**: Event-driven I/O multiplexing via macOS `kqueue`.
-3. **Lock-Free Queue Boundary**: Single-Producer Single-Consumer (`SPSCQueue`) ring buffer.
-4. **Matching Engine Core**: Deterministic, zero-allocation matching loop running at memory speed on a dedicated thread.
+The system strictly enforces the CQRS (Command Query Responsibility Segregation) pattern:
+1. **Execution Hot Path (Zero Mutexes, Zero Allocations)**: `MatchingEngine` produces execution events directly into a lock-free SPSC ring buffer. It never performs socket I/O, never acquires query locks, and never touches FastAPI.
+2. **Projection Pipeline**: A dedicated `Projector` background thread consumes from the outbound queue and updates the `ReadModel`.
+3. **Query Path (Cold Path Synchronization)**: REST query endpoints read from `ReadModel` using `std::shared_lock<std::shared_mutex>`. Multiple readers query concurrently without blocking each other and without affecting the matching engine.
 
 ---
 
@@ -153,27 +167,24 @@ A pre-allocated pool of 2 million `Order` slots replaces `new/delete` entirely. 
 
 A `vector<Order*>` indexed by `OrderId` gives instant access to any resting order. Cancel is a pointer lookup, a linked list unlink, and a bitmap clear — no search required.
 
-### Market Data Feed
+### Outbound Events & Bounded SPSC Queue
 
-The engine publishes an `L2Snapshot` (top 10 price levels per side) after every book change via a subscriber callback. Downstream consumers — stats tracker, CLI, dashboard — register handlers without the engine knowing about them. This mirrors real exchange market data dissemination architecture.
+Outbound events (`TradeEventPayload`, `L2UpdateEventPayload`, `OrderStateEventPayload`) are packaged into fixed-size POD structs with zero dynamic allocation (`std::string` and `std::vector` are completely avoided on the matching thread).
+- **Memory Ordering**: Uses `std::memory_order_release` on writes and `std::memory_order_acquire` on reads.
+- **Full-Queue / Backpressure Policy**:
+  - `Trade` and `OrderState` execution events are non-droppable and use bounded yield retries to guarantee history consistency.
+  - `L2Update` snapshots are coalesced/dropped if congested, as the subsequent snapshot contains the superseding latest book state.
 
-### Symbol Registry
+### Bounded In-Memory Read Model
 
-A bidirectional map between string symbols (`"AAPL"`, `"RELIANCE"`) and integer `InstrumentId` values sits outside the hot path. The engine routes entirely by integer ID at runtime — zero string operations in the matching loop.
+- **L2 Book State**: Retains the latest depth snapshot per instrument (top 10 levels, sequence number, timestamp).
+- **Trade History**: Fixed circular buffer (`BoundedTradeHistory`) capped at 1,000 trades per symbol. When capacity is reached, new trades overwrite the oldest entries (FIFO eviction).
+- **Order State History**: Bounded lookup table capped at 10,000 orders with automatic eviction of oldest orders.
 
-### Why Networking & HTTP are Outside MatchingEngine
+### Asymmetric Concurrency Model
 
-1. **Deterministic Latency**: Network I/O and HTTP request parsing are subject to syscall overhead, socket buffer starvation, network jitter, client stalls, and TCP fragmentation. Isolating all networking to outer adapter layers ensures the matching engine core runs uninterrupted.
-2. **Zero Locks on Hot Path**: The gateway thread and matching core communicate exclusively through a single-producer single-consumer (`SPSCQueue`) lock-free ring buffer. There are no mutexes, condition variables, or reader-writer locks in the matching loop.
-3. **Decoupled Framing & Parsing**: All wire format decoding, validation, and framing recovery occur before events reach the queue. The engine consumes only clean, validated internal `OrderEvent` structs.
-
-### Non-Blocking TCP Gateway (macOS kqueue)
-
-The gateway uses BSD `kqueue` (`EVFILT_READ`) on non-blocking sockets (`O_NONBLOCK` via `fcntl`):
-- **Incremental TCP Parsing**: Handles arbitrary stream chunking (e.g. 1-byte headers, split payloads, coalesced multiple frames).
-- **Per-Client Connection State**: Each connected descriptor maintains an independent `TcpParser` and receive buffer. One client's partial stream never affects other clients.
-- **Client Buffer Limits**: Enforces a strict 16 KB maximum buffer limit per connection to prevent memory exhaustion from slow/malformed clients.
-- **Bounded Backpressure**: If the lock-free SPSC ring buffer becomes full, the gateway executes bounded retries (`std::this_thread::yield()`). If congestion persists, the gateway disconnects the saturated client rather than dropping orders silently or stalling indefinitely.
+- **Hot Path**: Matching Engine $\to$ Lock-free SPSC $\to$ Projector. No mutexes or locks.
+- **Cold Path**: Client Query $\to$ `std::shared_lock<std::shared_mutex>` $\to$ ReadModel. Multiple concurrent queries execute in parallel without lock contention.
 
 ---
 
@@ -183,17 +194,19 @@ The Python API service (`FastAPI` + `Pydantic`) provides a standard HTTP interfa
 
 ### Endpoints
 
-| Method | Path | Description | Status Code |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/orders` | Submit Limit (GTC/IOC/FOK) or Market order | `202 Accepted` |
-| `DELETE` | `/orders/{order_id}` | Cancel resting order by ID (`?symbol=AAPL`) | `200 OK` |
-| `PATCH` | `/orders/{order_id}` | Modify resting order price and quantity | `200 OK` |
-| `GET` | `/book/{symbol}` | Query current order book depth for symbol | `200 OK` |
-| `GET` | `/health` | Active probe checking API & C++ Gateway reachability | `200 OK` / `503` |
+| Method | Path | Plane | Description | Status Code |
+| :--- | :--- | :--- | :--- | :--- |
+| `POST` | `/orders` | Command | Submit Limit (GTC/IOC/FOK) or Market order | `202 Accepted` |
+| `DELETE` | `/orders/{order_id}` | Command | Cancel resting order by ID (`?symbol=AAPL`) | `200 OK` |
+| `PATCH` | `/orders/{order_id}` | Command | Modify resting order price and quantity | `200 OK` |
+| `GET` | `/book/{symbol}` | Query | Query current L2 order book depth snapshot | `200 OK` / `404` |
+| `GET` | `/trades/{symbol}` | Query | Query recent trade execution history (`?limit=50`) | `200 OK` / `404` |
+| `GET` | `/orders/{order_id}` | Query | Query order lifecycle status and fill quantities | `200 OK` / `404` |
+| `GET` | `/health` | Ops | Active probe checking API & C++ Gateway reachability | `200 OK` / `503` |
 
 ### Example REST Requests
 
-#### 1. Submit Limit Buy Order
+#### 1. Submit Limit Buy Order (Command Plane)
 ```bash
 curl -X POST http://127.0.0.1:8000/orders \
   -H "Content-Type: application/json" \
@@ -214,40 +227,63 @@ Response (`202 Accepted`):
 }
 ```
 
-#### 2. Submit Market Sell Order
+#### 2. Query Order Book Depth (Query Plane)
 ```bash
-curl -X POST http://127.0.0.1:8000/orders \
-  -H "Content-Type: application/json" \
-  -d '{"symbol": "INFY", "side": "sell", "order_type": "market", "quantity": 50}'
-```
-
-#### 3. Cancel an Order
-```bash
-curl -X DELETE "http://127.0.0.1:8000/orders/1?symbol=AAPL"
-```
-
-#### 4. Modify an Order
-```bash
-curl -X PATCH http://127.0.0.1:8000/orders/1 \
-  -H "Content-Type: application/json" \
-  -d '{"symbol": "AAPL", "new_price": 155, "new_quantity": 5}'
-```
-
-#### 5. Check Health
-```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/book/AAPL
 ```
 Response (`200 OK`):
 ```json
 {
-  "status": "healthy",
-  "gateway": {
-    "host": "127.0.0.1",
-    "port": 12345,
-    "connected": true,
-    "error": null
-  },
-  "symbols": ["AAPL", "RELIANCE", "INFY", "TATASTEEL"]
+  "symbol": "AAPL",
+  "instrument_id": 0,
+  "sequence": 1,
+  "timestamp": 1725012345678,
+  "bids": [{"price": 150, "quantity": 10}],
+  "asks": []
+}
+```
+
+#### 3. Query Trade History (Query Plane)
+```bash
+curl "http://127.0.0.1:8000/trades/AAPL?limit=10"
+```
+Response (`200 OK`):
+```json
+{
+  "symbol": "AAPL",
+  "instrument_id": 0,
+  "trades": [
+    {
+      "trade_id": 1,
+      "symbol": "AAPL",
+      "buy_order_id": 1,
+      "sell_order_id": 2,
+      "price": 150,
+      "quantity": 10,
+      "aggressor_side": "sell",
+      "timestamp": 1725012345690
+    }
+  ]
+}
+```
+
+#### 4. Query Order Status (Query Plane)
+```bash
+curl http://127.0.0.1:8000/orders/1
+```
+Response (`200 OK`):
+```json
+{
+  "order_id": 1,
+  "symbol": "AAPL",
+  "instrument_id": 0,
+  "side": "buy",
+  "price": 150,
+  "original_quantity": 10,
+  "remaining_quantity": 0,
+  "filled_quantity": 10,
+  "status": "FILLED",
+  "timestamp": 1725012345690
 }
 ```
 
@@ -255,7 +291,7 @@ Response (`200 OK`):
 
 ## Binary TCP Wire Protocol Specification
 
-The gateway accepts an explicit length-prefixed binary wire format (Big-Endian / Network Byte Order).
+The gateway accepts an explicit length-prefixed binary wire format (Big-Endian / Network Byte Order) for both Commands and Queries.
 
 ### 1. Frame Header (3 Bytes)
 ```
@@ -265,34 +301,21 @@ The gateway accepts an explicit length-prefixed binary wire format (Big-Endian /
 +------------------------------------+-------------------------------------------+
 |<------------- 3 Bytes ------------>|<----------- N Bytes (Length) ------------>|
 ```
-- `payload_len` (`uint16_t`, BE): Length of payload in bytes (`MAX_PAYLOAD_LENGTH = 64`).
-- `msg_type` (`uint8_t`):
-  - `0x01`: New Limit Order (14-byte payload, 17-byte frame)
-  - `0x02`: New Market Order (9-byte payload, 12-byte frame)
-  - `0x03`: Cancel Order (12-byte payload, 15-byte frame)
-  - `0x04`: Modify Order (20-byte payload, 23-byte frame)
 
-### 2. Message Payloads
+### 2. Message Types & Framing
 
-| Message Type | Fields (Big-Endian) | Constraints |
-| :--- | :--- | :--- |
-| **New Limit Order (`0x01`)** | `instrument_id` (`uint32`), `side` (`uint8`), `price` (`uint32`), `qty` (`uint32`), `tif` (`uint8`) | `side`: 0=Buy, 1=Sell<br>`price`: 1..100000<br>`qty` >= 1<br>`tif`: 0=GTC, 1=IOC, 2=FOK |
-| **New Market Order (`0x02`)**| `instrument_id` (`uint32`), `side` (`uint8`), `qty` (`uint32`) | `side`: 0=Buy, 1=Sell<br>`qty` >= 1 |
-| **Cancel Order (`0x03`)**    | `instrument_id` (`uint32`), `order_id` (`uint64`) | `order_id` >= 1 |
-| **Modify Order (`0x04`)**    | `instrument_id` (`uint32`), `order_id` (`uint64`), `new_price` (`uint32`), `new_qty` (`uint32`) | `order_id` >= 1<br>`new_price`: 1..100000<br>`new_qty` >= 1 |
-
----
-
-## Order Types
-
-| Type | Behaviour |
-|------|-----------|
-| Limit GTC | Rests in book at specified price until filled or cancelled |
-| Limit IOC | Fills available quantity immediately, residual discarded |
-| Limit FOK | Fills entire quantity or cancelled with zero fills |
-| Market    | Matches against best available price, no resting |
-
-FOK uses a pre-match volume check — available liquidity at or better than the limit price is verified before any trades execute. If insufficient, the order is rejected atomically with no side effects.
+| Code | Message Type | Category | Payload Size | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `0x01` | `NewLimitOrder` | Command | 14 bytes | `instrument_id` (4B), `side` (1B), `price` (4B), `qty` (4B), `tif` (1B) |
+| `0x02` | `NewMarketOrder` | Command | 9 bytes | `instrument_id` (4B), `side` (1B), `qty` (4B) |
+| `0x03` | `CancelOrder` | Command | 12 bytes | `instrument_id` (4B), `order_id` (8B) |
+| `0x04` | `ModifyOrder` | Command | 20 bytes | `instrument_id` (4B), `order_id` (8B), `new_price` (4B), `new_qty` (4B) |
+| `0x10` | `QueryBook` | Query | 4 bytes | `instrument_id` (4B) |
+| `0x11` | `QueryTrades` | Query | 8 bytes | `instrument_id` (4B), `limit` (4B) |
+| `0x12` | `QueryOrder` | Query | 8 bytes | `order_id` (8B) |
+| `0x80` | `QueryBookResponse` | Response | Variable | `inst_id` (4B), `seq` (8B), `ts` (8B), `b_cnt` (1B), `a_cnt` (1B), levels |
+| `0x81` | `QueryTradesResponse`| Response | Variable | `inst_id` (4B), `count` (2B), array of 41-byte trade records |
+| `0x82` | `QueryOrderResponse` | Response | 39 bytes | `found` (1B), `order_id` (8B), `inst_id` (4B), `side` (1B), `px`, `qty`, `status`, `ts` |
 
 ---
 
@@ -332,21 +355,22 @@ Per instrument (sample):
 
 ## Test Suites
 
-The project contains 69 automated test cases across C++ and Python suites:
+The project contains **89 automated test cases** across C++ and Python suites:
 
-### 1. C++ Engine & Gateway Tests (54 tests)
+### 1. C++ Engine, Gateway & Read Model Tests (68 tests)
 ```bash
 make test
 ```
 - **`test_engine` (18 tests)**: Core matching semantics (FIFO priority, price priority, GTC/IOC/FOK execution, partial fills, cancellations, multi-instrument isolation).
 - **`test_wire` (18 tests)**: Protocol framing, endian-safe serialization/deserialization, frame length validation, boundary conditions, malformed frame detection.
-- **`test_gateway` (18 tests)**: Real TCP socket integration via kqueue (server lifecycle, client connections, fragmented TCP frames, 1-byte delivery, multiple clients, backpressure, buffer overflow).
+- **`test_gateway` (21 tests)**: Real TCP socket integration via kqueue (server lifecycle, client connections, fragmented TCP frames, 1-byte delivery, multiple clients, backpressure, buffer overflow, TCP queries for book/trades/orders).
+- **`test_read_model` (11 tests)**: ReadModel event application, trade history FIFO eviction, bounded order tracking, multi-instrument isolation, concurrent multi-reader safety, and queue drain on shutdown.
 
-### 2. Python REST API Tests (15 tests)
+### 2. Python REST API Tests (21 tests)
 ```bash
 make test-api
 ```
-- **`test_api` (15 tests)**: HTTP endpoint validation, Pydantic bounds checks, invalid symbols/sides/prices, gateway unreachable handling, health probes, and end-to-end HTTP -> FastAPI -> TCP Client -> C++ Gateway -> Matching Engine execution.
+- **`test_api` (21 tests)**: HTTP endpoint validation, Pydantic bounds checks, invalid symbols/sides/prices, gateway unreachable handling, health probes, `/book/{symbol}`, `/trades/{symbol}`, `/orders/{order_id}`, and end-to-end HTTP $\to$ FastAPI $\to$ TCP Client $\to$ C++ Gateway $\to$ Matching Engine $\to$ Read Model execution.
 
 ---
 
@@ -360,7 +384,7 @@ make test-api
 | Memory | pool allocator | new/delete | Zero heap calls in hot path |
 | Order lookup | direct index vector | unordered_map | True $O(1)$, no hashing |
 | Threading | SPSC queue | mutex + shared queue | Zero contention, no lock overhead |
-| Feed delivery | callback subscribers | polling | Decoupled, extensible |
+| Read/Query Plane | In-Memory ReadModel + Projector | DB / Redis / Shared Mutex on Engine | Zero locking/blocking on matching engine hot path |
 | Symbol routing | integer InstrumentId | string map | No string ops in hot path |
 | Network I/O | kqueue event loop | thread-per-client | Scalable non-blocking multiplexing |
 | Client API | FastAPI REST adapter | direct HTTP in C++ | Decouples web/JSON from matching core |
@@ -390,7 +414,7 @@ make test-api
 ### Build Targets
 
 ```bash
-# 1. Run all C++ unit and integration test suites
+# 1. Run all C++ unit and integration test suites (Engine, Wire, Gateway, Read Model)
 make test
 
 # 2. Run Python REST API unit and integration test suites
@@ -411,7 +435,7 @@ make gateway
 
 ### Running the End-to-End System
 
-#### Step 1: Start the C++ TCP Gateway
+#### Step 1: Start the C++ TCP Gateway & Read Model
 In terminal 1:
 ```bash
 ./gateway 12345
@@ -424,18 +448,27 @@ make api
 ```
 The FastAPI application starts on `http://127.0.0.1:8000`.
 
-#### Step 3: Send Orders via HTTP
+#### Step 3: Interact via HTTP REST Endpoints
 In terminal 3:
 ```bash
-# Submit Buy Limit order
+# 1. Submit Buy Limit order
 curl -X POST http://127.0.0.1:8000/orders \
   -H "Content-Type: application/json" \
   -d '{"symbol": "AAPL", "side": "buy", "order_type": "limit", "price": 150, "quantity": 10, "time_in_force": "GTC"}'
 
-# Submit matching Sell Limit order
+# 2. Query L2 Book Depth Snapshot
+curl http://127.0.0.1:8000/book/AAPL
+
+# 3. Submit matching Sell Limit order
 curl -X POST http://127.0.0.1:8000/orders \
   -H "Content-Type: application/json" \
   -d '{"symbol": "AAPL", "side": "sell", "order_type": "limit", "price": 150, "quantity": 10, "time_in_force": "GTC"}'
+
+# 4. Query Trade History
+curl "http://127.0.0.1:8000/trades/AAPL?limit=10"
+
+# 5. Query Order State
+curl http://127.0.0.1:8000/orders/1
 ```
 
 ---
@@ -448,31 +481,36 @@ include/
   price_level.h         PriceLevel: head/tail pointers + total volume
   order_pool.h          Pool allocator with free-list reuse
   orderbook.h           Order book interface
-  matching_engine.h     Engine interface with feed and stats wiring
+  matching_engine.h     Engine interface with feed and outbound queue wiring
+  outbound_events.h     Zero-allocation POD outbound events (Trade, L2Update, OrderState)
+  read_model.h          In-memory ReadModel with bounded circular buffer trade history
+  projector.h           Dedicated consumer thread projecting outbound events to ReadModel
   network_protocol.h    OrderEvent struct (internal domain format)
   wire_protocol.h       Binary wire format constants, codecs, endian helpers
-  tcp_parser.h          Incremental TCP stream parser and validation
+  tcp_parser.h          Incremental TCP stream parser (Commands & Queries)
   tcp_gateway.h         macOS kqueue gateway and connection management
-  spsc_queue.h          Lock-free SPSC ring buffer
+  spsc_queue.h          Generic lock-free SPSC ring buffer (Command & Outbound queues)
   symbol_registry.h     String symbol to InstrumentId mapping
   market_data.h         L2Snapshot type and MarketDataFeed subscriber
   stats_tracker.h       Per-instrument VWAP, spread, volume tracking
 
 src/
   orderbook.cpp         Price ladder, bitmap, intrusive list, depth query
-  matching_engine.cpp   Matching logic, order routing, feed publishing
-  tcp_gateway.cpp       kqueue event loop, non-blocking I/O, SPSC handoff
-  gateway_main.cpp      Standalone TCP gateway entry point
+  matching_engine.cpp   Matching logic, order routing, outbound event emission
+  read_model.cpp        ReadModel state management and shared_mutex synchronization
+  projector.cpp         Projector event loop and clean drain lifecycle
+  tcp_gateway.cpp       kqueue event loop, non-blocking I/O, SPSC handoff, query handler
+  gateway_main.cpp      Standalone TCP gateway and ReadModel server entry point
 
 api/
   __init__.py           API module definition
   config.py             Gateway host/port settings & symbol mapping
-  models.py             Pydantic models for order requests/responses
-  tcp_client.py         Thread-safe binary TCP client for C++ gateway
-  main.py               FastAPI application, routes, and exception handlers
+  models.py             Pydantic models for order commands and read queries
+  tcp_client.py         Thread-safe binary TCP client for commands and read queries
+  main.py               FastAPI application, command routes, and query routes
 
 scripts/
-  client.py             Python binary protocol encoder and TCP reference client
+  client.py             Python binary protocol encoder/decoder and reference client
 
 tests/
   dashboard.cpp         Live ncurses terminal dashboard
@@ -480,9 +518,10 @@ tests/
   simulation.cpp        Multi-threaded producer/consumer, 5M orders
   test_engine.cpp       18-case matching engine correctness suite
   test_wire_protocol.cpp 18-case wire protocol & parser test suite
-  test_gateway.cpp      18-case TCP kqueue gateway integration test suite
-  test_api.py           15-case FastAPI and end-to-end integration test suite
-  benchmark.cpp         Google Benchmark harness with naive baseline
+  test_gateway.cpp      21-case TCP kqueue gateway integration test suite
+  test_read_model.cpp   11-case C++ ReadModel and Projector test suite
+  test_api.py           21-case FastAPI and end-to-end integration test suite
+  benchmark.cpp         Google Benchmark latency suite with naive baseline
 ```
 
 ---
@@ -494,6 +533,7 @@ tests/
 3. **Benchmark Instrument Registration**: Fixed an uncaught `Unknown instrument id` runtime exception in benchmark runs by registering `"AAPL"` explicitly before order dispatch.
 4. **Signal Safety on Closed Sockets (`SIGPIPE`)**: Writing to disconnected client sockets raised `SIGPIPE` (Exit 141). Resolved by setting `std::signal(SIGPIPE, SIG_IGN)` and configuring `SO_NOSIGPIPE` on macOS sockets.
 5. **Socket Port Reuse (`SO_REUSEPORT`)**: Enabled `SO_REUSEPORT` alongside `SO_REUSEADDR` to eliminate port binding collisions during rapid test execution.
+6. **Query Trades Frame Stride Alignment**: Fixed a trade record payload calculation in `encode_query_trades_response` where 41-byte struct sizes were packed with a 37-byte offset, restoring exact framing alignment.
 
 ---
 

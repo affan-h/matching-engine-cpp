@@ -9,17 +9,18 @@ SRC_DIR  = src
 TEST_DIR = tests
 
 CORE_SRC = $(SRC_DIR)/matching_engine.cpp $(SRC_DIR)/orderbook.cpp
+READ_SRC = $(SRC_DIR)/read_model.cpp $(SRC_DIR)/projector.cpp
+GATEWAY_SRC = $(CORE_SRC) $(READ_SRC) $(SRC_DIR)/tcp_gateway.cpp
 
 # Targets
-CLI_TARGET          = cli
-SIM_TARGET          = sim
-TEST_TARGET         = test
-BENCH_TARGET        = bench
-WIRE_TEST_TARGET    = test_wire
-GATEWAY_TARGET      = gateway
-GATEWAY_TEST_TARGET = test_gateway
-
-GATEWAY_SRC = $(CORE_SRC) $(SRC_DIR)/tcp_gateway.cpp
+CLI_TARGET             = cli
+SIM_TARGET             = sim
+TEST_TARGET            = test
+BENCH_TARGET           = bench
+WIRE_TEST_TARGET       = test_wire
+GATEWAY_TARGET         = gateway
+GATEWAY_TEST_TARGET    = test_gateway
+READ_MODEL_TEST_TARGET = test_read_model
 
 # Python virtualenv tools
 VENV       = .venv
@@ -27,9 +28,9 @@ PYTHON     = $(VENV)/bin/python
 UVICORN    = $(VENV)/bin/uvicorn
 PYTEST     = $(VENV)/bin/pytest
 
-.PHONY: all cli sim test test_wire test_gateway gateway bench api test-api clean
+.PHONY: all cli sim test test_wire test_gateway test_read_model gateway bench api test-api clean
 
-all: cli sim test test_wire test_gateway gateway
+all: cli sim test test_wire test_gateway test_read_model gateway
 
 cli:
 	$(CXX) $(CXXFLAGS) $(CORE_SRC) $(TEST_DIR)/cli.cpp -o $(CLI_TARGET)
@@ -46,6 +47,8 @@ test:
 	./$(WIRE_TEST_TARGET)
 	$(CXX) $(CXXFLAGS) $(GATEWAY_SRC) $(TEST_DIR)/test_gateway.cpp -o $(GATEWAY_TEST_TARGET)
 	./$(GATEWAY_TEST_TARGET)
+	$(CXX) $(CXXFLAGS) $(GATEWAY_SRC) $(TEST_DIR)/test_read_model.cpp -o $(READ_MODEL_TEST_TARGET)
+	./$(READ_MODEL_TEST_TARGET)
 
 test_wire:
 	$(CXX) $(CXXFLAGS) $(TEST_DIR)/test_wire_protocol.cpp -o $(WIRE_TEST_TARGET)
@@ -54,6 +57,10 @@ test_wire:
 test_gateway:
 	$(CXX) $(CXXFLAGS) $(GATEWAY_SRC) $(TEST_DIR)/test_gateway.cpp -o $(GATEWAY_TEST_TARGET)
 	./$(GATEWAY_TEST_TARGET)
+
+test_read_model:
+	$(CXX) $(CXXFLAGS) $(GATEWAY_SRC) $(TEST_DIR)/test_read_model.cpp -o $(READ_MODEL_TEST_TARGET)
+	./$(READ_MODEL_TEST_TARGET)
 
 gateway:
 	$(CXX) $(CXXFLAGS) $(GATEWAY_SRC) $(SRC_DIR)/gateway_main.cpp -o $(GATEWAY_TARGET)
@@ -70,5 +77,5 @@ bench:
 	./$(BENCH_TARGET)
 
 clean:
-	rm -f $(CLI_TARGET) $(SIM_TARGET) $(TEST_TARGET) $(BENCH_TARGET) $(WIRE_TEST_TARGET) $(GATEWAY_TARGET) $(GATEWAY_TEST_TARGET) test_wire_protocol
+	rm -f $(CLI_TARGET) $(SIM_TARGET) $(TEST_TARGET) $(BENCH_TARGET) $(WIRE_TEST_TARGET) $(GATEWAY_TARGET) $(GATEWAY_TEST_TARGET) $(READ_MODEL_TEST_TARGET) test_wire_protocol
 	rm -rf .pytest_cache __pycache__ api/__pycache__ tests/__pycache__ scripts/__pycache__

@@ -2,10 +2,14 @@
 
 #include <unordered_map>
 #include <string>
+#include <vector>
+#include <functional>
 #include "orderbook.h"
 #include "symbol_registry.h"
 #include "market_data.h"
 #include "stats_tracker.h"
+#include "outbound_events.h"
+#include "spsc_queue.h"
 
 class MatchingEngine {
 private:
@@ -16,12 +20,32 @@ private:
     uint64_t nextTradeId = 0;
     uint64_t totalTrades = 0;
 
+    OutboundEventQueue*    outboundQueue = nullptr;
+    uint64_t               l2Sequence = 0;
+
     void publishSnapshot(InstrumentId instrument);
 
     std::vector<std::function<void(InstrumentId, const std::string&,
                                    Price, Quantity, Side)>> tradeSubscribers;
 
+    void publishOutbound(const events::OutboundEvent& event);
+    void emitOrderState(
+        OrderId id,
+        InstrumentId inst,
+        Side side,
+        Price price,
+        Quantity orig_qty,
+        Quantity rem_qty,
+        Quantity filled_qty,
+        events::OrderStatus status,
+        Timestamp ts
+    );
+
 public:
+    void setOutboundQueue(OutboundEventQueue* queue) {
+        outboundQueue = queue;
+    }
+
     // Allow external code to subscribe to market data
     void subscribeMarketData(SnapshotCallback cb) {
         feed.subscribe(std::move(cb));
@@ -38,7 +62,7 @@ public:
         return registry.exists(symbol);
     }
 
-    // New convenience overloads that accept symbol strings
+    // Instrument registration
     InstrumentId registerInstrument(const std::string& symbol) {
         InstrumentId id = registry.registerSymbol(symbol);
         if (id >= books.size())

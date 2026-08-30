@@ -12,8 +12,13 @@
 #include <iostream>
 #include <vector>
 
-TcpGateway::TcpGateway(MatchingEngine& engine, SPSCQueue& queue, const GatewayConfig& config)
-    : engine(engine), queue(queue), config(config)
+TcpGateway::TcpGateway(
+    MatchingEngine& engine,
+    SPSCQueue& queue,
+    const GatewayConfig& config,
+    ReadModel* read_model
+)
+    : engine(engine), queue(queue), config(config), read_model(read_model)
 {
     std::signal(SIGPIPE, SIG_IGN);
 }
@@ -61,31 +66,31 @@ bool TcpGateway::start() {
         return false;
     }
 
-    if (bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+    if (bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "[TcpGateway] bind() failed on port " << config.port << ": " << errno << "\n";
         close(listen_fd);
         listen_fd = -1;
         return false;
     }
 
-    // 5. Listen
-    if (listen(listen_fd, SOMAXCONN) < 0) {
-        std::cerr << "[TcpGateway] listen() failed\n";
-        close(listen_fd);
-        listen_fd = -1;
-        return false;
-    }
-
-    // 6. Retrieve bound port (crucial if port was 0 / ephemeral)
+    // 5. Retrieve dynamic port if ephemeral (port 0)
     sockaddr_in bound_addr{};
     socklen_t bound_len = sizeof(bound_addr);
-    if (getsockname(listen_fd, reinterpret_cast<struct sockaddr*>(&bound_addr), &bound_len) == 0) {
+    if (getsockname(listen_fd, reinterpret_cast<sockaddr*>(&bound_addr), &bound_len) == 0) {
         bound_port = ntohs(bound_addr.sin_port);
     } else {
         bound_port = config.port;
     }
 
-    // 7. Create kqueue descriptor
+    // 6. Listen backlog
+    if (listen(listen_fd, 1024) < 0) {
+        std::cerr << "[TcpGateway] listen() failed: " << errno << "\n";
+        close(listen_fd);
+        listen_fd = -1;
+        return false;
+    }
+
+    // 7. Create kqueue
     kq_fd = kqueue();
     if (kq_fd < 0) {
         std::cerr << "[TcpGateway] kqueue() failed: " << errno << "\n";
@@ -94,48 +99,35 @@ bool TcpGateway::start() {
         return false;
     }
 
-    // 8. Register listen_fd read event in kqueue
-    struct kevent change;
-    EV_SET(&change, listen_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-    if (kevent(kq_fd, &change, 1, nullptr, 0, nullptr) < 0) {
-        std::cerr << "[TcpGateway] kevent(listen_fd) registration failed\n";
+    // 8. Register listen_fd with kqueue for read events
+    struct kevent ev{};
+    EV_SET(&ev, listen_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
+    if (kevent(kq_fd, &ev, 1, nullptr, 0, nullptr) < 0) {
+        std::cerr << "[TcpGateway] kevent(listen_fd) failed: " << errno << "\n";
         close(kq_fd);
         close(listen_fd);
-        kq_fd = -1;
         listen_fd = -1;
+        kq_fd = -1;
         return false;
     }
 
     is_running.store(true);
 
-    // 9. Start worker threads
+    // 9. Launch threads: Gateway Event Loop + Engine Consumer
+    gateway_thread = std::thread(&TcpGateway::runGateway, this);
     consumer_thread = std::thread(&TcpGateway::runConsumer, this);
-    gateway_thread  = std::thread(&TcpGateway::runGateway, this);
 
     return true;
 }
 
 void TcpGateway::stop() {
-    if (!is_running.exchange(false)) {
+    if (!is_running.load()) {
         return;
     }
 
-    // Join gateway event loop
-    if (gateway_thread.joinable()) {
-        gateway_thread.join();
-    }
+    is_running.store(false);
 
-    // Join matching engine consumer thread
-    if (consumer_thread.joinable()) {
-        consumer_thread.join();
-    }
-
-    // Close all open client connections
-    for (auto& [fd, client] : clients) {
-        close(fd);
-    }
-    clients.clear();
-
+    // Close listen socket and kqueue to unblock kevent()
     if (listen_fd >= 0) {
         close(listen_fd);
         listen_fd = -1;
@@ -145,86 +137,135 @@ void TcpGateway::stop() {
         close(kq_fd);
         kq_fd = -1;
     }
+
+    // Join threads
+    if (gateway_thread.joinable()) {
+        gateway_thread.join();
+    }
+    if (consumer_thread.joinable()) {
+        consumer_thread.join();
+    }
+
+    // Close all open client connections
+    for (auto& pair : clients) {
+        if (pair.second.fd >= 0) {
+            close(pair.second.fd);
+        }
+    }
+    clients.clear();
 }
 
 void TcpGateway::closeClient(int fd) {
     auto it = clients.find(fd);
     if (it != clients.end()) {
-        it->second.parser.reset();
+        close(fd);
         clients.erase(it);
         stats.connections_closed++;
     }
+}
 
-    struct kevent ev;
-    EV_SET(&ev, fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-    kevent(kq_fd, &ev, 1, nullptr, 0, nullptr);
+void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
+    if (!read_model) return;
 
-    close(fd);
+    switch (query.type) {
+        case wire::MessageType::QueryBook: {
+            L2BookState book;
+            read_model->getL2Book(query.instrument_id, book);
+            auto resp = wire::encode_query_book_response(book);
+            send(fd, resp.data(), resp.size(), 0);
+            break;
+        }
+        case wire::MessageType::QueryTrades: {
+            std::vector<TradeRecord> trades;
+            read_model->getRecentTrades(query.instrument_id, query.limit, trades);
+            auto resp = wire::encode_query_trades_response(query.instrument_id, trades);
+            send(fd, resp.data(), resp.size(), 0);
+            break;
+        }
+        case wire::MessageType::QueryOrder: {
+            OrderRecord order;
+            bool found = read_model->getOrder(query.order_id, order);
+            auto resp = wire::encode_query_order_response(found, order);
+            send(fd, resp.data(), resp.size(), 0);
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 void TcpGateway::runGateway() {
-    struct kevent event_list[64];
+    constexpr int MAX_EVENTS = 64;
+    struct kevent event_list[MAX_EVENTS];
+    uint8_t recv_buf[4096];
+
+    // Timeout 100ms for responsiveness to shutdown
+    struct timespec timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_nsec = 100000000; // 100 ms
 
     while (is_running.load(std::memory_order_relaxed)) {
-        // Poll with 20ms timeout to periodically check is_running
-        struct timespec timeout;
-        timeout.tv_sec  = 0;
-        timeout.tv_nsec = 20'000'000; // 20 ms
+        int n_events = kevent(kq_fd, nullptr, 0, event_list, MAX_EVENTS, &timeout);
 
-        int nev = kevent(kq_fd, nullptr, 0, event_list, 64, &timeout);
-        if (nev < 0) {
+        if (n_events < 0) {
             if (errno == EINTR) continue;
-            if (!is_running.load(std::memory_order_relaxed)) break;
-            std::cerr << "[TcpGateway] kevent() error: " << errno << "\n";
-            break;
+            break; // Socket closed or error during shutdown
         }
 
-        for (int i = 0; i < nev; ++i) {
+        for (int i = 0; i < n_events; ++i) {
             int fd = static_cast<int>(event_list[i].ident);
 
             if (fd == listen_fd) {
-                // Accept all pending incoming connections
+                // Accept new client connections in a non-blocking loop
                 while (true) {
                     sockaddr_in client_addr{};
                     socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(listen_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_len);
+                    int client_fd = accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            break; // No more incoming connections
+                            break; // No more pending connections
                         }
-                        if (errno == EINTR) continue;
                         break;
                     }
 
-                    // Set client socket non-blocking
+                    // Configure non-blocking client socket
                     int cflags = fcntl(client_fd, F_GETFL, 0);
-                    fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
+                    if (cflags >= 0) {
+                        fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
+                    }
 
-                    // Ignore SIGPIPE on socket writes (macOS)
-                    int sopt = 1;
-                    setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &sopt, sizeof(sopt));
+                    // Prevent SIGPIPE on write to closed socket on macOS
+#ifdef SO_NOSIGPIPE
+                    int set_nosigpipe = 1;
+                    setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &set_nosigpipe, sizeof(set_nosigpipe));
+#endif
 
-                    // Register with kqueue
-                    struct kevent client_ev;
+                    // Register client with kqueue for read events
+                    struct kevent client_ev{};
                     EV_SET(&client_ev, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-                    kevent(kq_fd, &client_ev, 1, nullptr, 0, nullptr);
-
-                    clients[client_fd] = ClientConnection{client_fd, TcpParser{}};
-                    stats.connections_accepted++;
+                    if (kevent(kq_fd, &client_ev, 1, nullptr, 0, nullptr) == 0) {
+                        ClientConnection conn;
+                        conn.fd = client_fd;
+                        clients[client_fd] = std::move(conn);
+                        stats.connections_accepted++;
+                    } else {
+                        close(client_fd);
+                    }
                 }
             } else {
-                // Client socket event
+                // Data available on client socket
                 auto it = clients.find(fd);
                 if (it == clients.end()) continue;
-                ClientConnection& client = it->second;
 
+                ClientConnection& client = it->second;
                 bool should_close = false;
-                uint8_t recv_buf[4096];
 
                 while (true) {
                     ssize_t n = recv(fd, recv_buf, sizeof(recv_buf), 0);
+
                     if (n > 0) {
-                        // Per-client buffer overflow protection
+                        // Check buffer overflow protection (16 KB max)
                         if (client.parser.remainingBytes() + static_cast<size_t>(n) > config.max_client_buffer) {
                             stats.buffer_overflows++;
                             should_close = true;
@@ -235,33 +276,36 @@ void TcpGateway::runGateway() {
 
                         // Parse all complete frames in buffer
                         while (true) {
-                            OrderEvent event{};
+                            ParsedFrame frame{};
                             ParseError err = ParseError::None;
-                            ParseStatus status = client.parser.parseNext(event, err);
+                            ParseStatus status = client.parser.parseNextFrame(frame, err);
 
                             if (status == ParseStatus::Ok) {
-                                // Push to SPSC Queue with bounded backpressure retries
-                                bool pushed = false;
-                                for (int retry = 0; retry < config.max_backpressure_retries; ++retry) {
-                                    if (queue.push(event)) {
-                                        pushed = true;
-                                        break;
+                                if (frame.category == FrameCategory::Command) {
+                                    // Push to SPSC Queue with bounded backpressure retries
+                                    bool pushed = false;
+                                    for (int retry = 0; retry < config.max_backpressure_retries; ++retry) {
+                                        if (queue.push(frame.command)) {
+                                            pushed = true;
+                                            break;
+                                        }
+                                        std::this_thread::yield();
                                     }
-                                    std::this_thread::yield();
-                                }
 
-                                if (!pushed) {
-                                    // Severe backpressure: drop and disconnect client
-                                    stats.queue_full_drops++;
-                                    should_close = true;
-                                    break;
-                                } else {
-                                    stats.events_pushed++;
+                                    if (!pushed) {
+                                        stats.queue_full_drops++;
+                                        should_close = true;
+                                        break;
+                                    } else {
+                                        stats.events_pushed++;
+                                    }
+                                } else if (frame.category == FrameCategory::Query) {
+                                    handleQuery(fd, frame.query);
+                                    stats.queries_processed++;
                                 }
                             } else if (status == ParseStatus::NeedMoreData) {
                                 break; // Waiting for more network bytes
                             } else {
-                                // Fatal framing/validation error -> disconnect client
                                 stats.malformed_frames++;
                                 should_close = true;
                                 break;

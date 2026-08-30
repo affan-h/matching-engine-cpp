@@ -11,6 +11,7 @@
 #include "spsc_queue.h"
 #include "matching_engine.h"
 #include "tcp_parser.h"
+#include "read_model.h"
 
 // ─────────────────────────────────────────────
 // Gateway Configuration & Statistics
@@ -28,6 +29,7 @@ struct GatewayStats {
     std::atomic<uint64_t> connections_closed{0};
     std::atomic<uint64_t> events_pushed{0};
     std::atomic<uint64_t> events_processed{0};
+    std::atomic<uint64_t> queries_processed{0};
     std::atomic<uint64_t> malformed_frames{0};
     std::atomic<uint64_t> buffer_overflows{0};
     std::atomic<uint64_t> queue_full_drops{0};
@@ -51,6 +53,7 @@ private:
     MatchingEngine& engine;
     SPSCQueue&      queue;
     GatewayConfig   config;
+    ReadModel*      read_model{nullptr};
 
     int listen_fd = -1;
     int kq_fd     = -1;
@@ -66,9 +69,15 @@ private:
     void runGateway();
     void runConsumer();
     void closeClient(int fd);
+    void handleQuery(int fd, const QueryFrame& query);
 
 public:
-    TcpGateway(MatchingEngine& engine, SPSCQueue& queue, const GatewayConfig& config = {});
+    TcpGateway(
+        MatchingEngine& engine,
+        SPSCQueue& queue,
+        const GatewayConfig& config = {},
+        ReadModel* read_model = nullptr
+    );
     ~TcpGateway();
 
     // Starts gateway event loop and matching engine consumer thread
@@ -76,6 +85,10 @@ public:
 
     // Stops gateway and consumer cleanly, closing all client connections
     void stop();
+
+    // Read Model Configuration
+    void setReadModel(ReadModel* model) { read_model = model; }
+    ReadModel* getReadModel() const { return read_model; }
 
     // Accessors
     bool isRunning() const { return is_running.load(); }

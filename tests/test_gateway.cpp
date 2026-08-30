@@ -659,6 +659,165 @@ TEST(test_buffer_overflow_protection) {
     gateway.stop();
 }
 
+static std::vector<uint8_t> recv_exact(int fd, size_t n) {
+    std::vector<uint8_t> buf(n);
+    size_t received = 0;
+    while (received < n) {
+        ssize_t ret = recv(fd, buf.data() + received, n - received, 0);
+        if (ret <= 0) throw std::runtime_error("recv() failed");
+        received += ret;
+    }
+    return buf;
+}
+
+static std::pair<wire::MessageType, std::vector<uint8_t>> recv_response(int fd) {
+    auto hdr = recv_exact(fd, 3);
+    uint16_t payload_len = wire::read_u16_be(hdr.data());
+    wire::MessageType type = static_cast<wire::MessageType>(hdr[2]);
+    auto payload = recv_exact(fd, payload_len);
+    return {type, payload};
+}
+
+// ─────────────────────────────────────────────
+// 19. Query Book Over TCP
+// ─────────────────────────────────────────────
+TEST(test_query_book_over_tcp) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    L2BookState book_state;
+    book_state.instrument_id = aapl;
+    book_state.symbol = "AAPL";
+    book_state.sequence = 1;
+    book_state.bid_count = 1;
+    book_state.ask_count = 1;
+    book_state.bids[0] = {150, 10};
+    book_state.asks[0] = {155, 20};
+
+    events::OutboundEvent evt;
+    evt.type = events::OutboundEventType::L2Update;
+    evt.l2.instrument_id = aapl;
+    evt.l2.sequence = 1;
+    evt.l2.bid_count = 1;
+    evt.l2.ask_count = 1;
+    evt.l2.bids[0] = {150, 10};
+    evt.l2.asks[0] = {155, 20};
+    read_model.applyEvent(evt);
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+
+    auto q_frame = wire::encode_query_book(aapl);
+    send_all(client, q_frame);
+
+    auto [type, payload] = recv_response(client);
+    ASSERT(type == wire::MessageType::QueryBookResponse, "Expected QueryBookResponse");
+    ASSERT(payload.size() == 22 + 16, "Expected 38 bytes payload");
+    ASSERT(wire::read_u32_be(payload.data()) == aapl, "Instrument ID match");
+    ASSERT(wire::read_u64_be(payload.data() + 4) == 1, "Sequence match");
+    ASSERT(payload[20] == 1, "Bid count 1");
+    ASSERT(payload[21] == 1, "Ask count 1");
+
+    close(client);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 20. Query Trades Over TCP
+// ─────────────────────────────────────────────
+TEST(test_query_trades_over_tcp) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    events::OutboundEvent evt;
+    evt.type = events::OutboundEventType::Trade;
+    evt.trade.trade_id = 42;
+    evt.trade.instrument_id = aapl;
+    evt.trade.buy_order_id = 1;
+    evt.trade.sell_order_id = 2;
+    evt.trade.price = 150;
+    evt.trade.quantity = 10;
+    evt.trade.aggressor_side = Side::Buy;
+    evt.trade.timestamp = 12345;
+    read_model.applyEvent(evt);
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+
+    auto q_frame = wire::encode_query_trades(aapl, 10);
+    send_all(client, q_frame);
+
+    auto [type, payload] = recv_response(client);
+    ASSERT(type == wire::MessageType::QueryTradesResponse, "Expected QueryTradesResponse");
+    ASSERT(wire::read_u32_be(payload.data()) == aapl, "Instrument match");
+    ASSERT(wire::read_u16_be(payload.data() + 4) == 1, "Trade count 1");
+    ASSERT(wire::read_u64_be(payload.data() + 6) == 42, "Trade ID match");
+
+    close(client);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 21. Query Order Over TCP
+// ─────────────────────────────────────────────
+TEST(test_query_order_over_tcp) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    events::OutboundEvent evt;
+    evt.type = events::OutboundEventType::OrderState;
+    evt.order.order_id = 99;
+    evt.order.instrument_id = aapl;
+    evt.order.side = Side::Buy;
+    evt.order.price = 150;
+    evt.order.original_qty = 20;
+    evt.order.remaining_qty = 5;
+    evt.order.filled_qty = 15;
+    evt.order.status = events::OrderStatus::PartiallyFilled;
+    evt.order.timestamp = 9999;
+    read_model.applyEvent(evt);
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+
+    auto q_frame = wire::encode_query_order(99);
+    send_all(client, q_frame);
+
+    auto [type, payload] = recv_response(client);
+    ASSERT(type == wire::MessageType::QueryOrderResponse, "Expected QueryOrderResponse");
+    ASSERT(payload[0] == 1, "Found = 1");
+    ASSERT(wire::read_u64_be(payload.data() + 1) == 99, "Order ID 99");
+    ASSERT(wire::read_u32_be(payload.data() + 9) == aapl, "Instrument ID match");
+    ASSERT(payload[30] == static_cast<uint8_t>(events::OrderStatus::PartiallyFilled), "Status match");
+
+    close(client);
+    gateway.stop();
+}
+
 // ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
@@ -684,6 +843,9 @@ int main() {
     RUN(test_multiple_simultaneous_clients);
     RUN(test_queue_full_behavior);
     RUN(test_buffer_overflow_protection);
+    RUN(test_query_book_over_tcp);
+    RUN(test_query_trades_over_tcp);
+    RUN(test_query_order_over_tcp);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";
