@@ -491,6 +491,44 @@ TEST(test_modify_invalid_price_qty_preserves_resting_order) {
 }
 
 // ─────────────────────────────────────────────
+// Test: Rapid Order Lifecycle Churn
+// ─────────────────────────────────────────────
+TEST(test_order_lifecycle_rapid_churn) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    std::vector<OrderId> active_bids;
+    active_bids.reserve(500);
+
+    // 1. Insert 500 bids at price 100
+    for (int i = 0; i < 500; ++i) {
+        OrderId id = engine.addLimitOrder(inst, Side::Buy, 100, 10, TimeInForce::GTC);
+        active_bids.push_back(id);
+    }
+
+    // 2. Reduce size in-place for every even order
+    for (size_t i = 0; i < active_bids.size(); i += 2) {
+        bool ok = engine.modifyOrder(inst, active_bids[i], 100, 5);
+        ASSERT(ok, "In-place reduce size must succeed");
+    }
+
+    // 3. Cancel every fourth order
+    size_t cancelled_count = 0;
+    for (size_t i = 0; i < active_bids.size(); i += 4) {
+        bool ok = engine.cancelOrder(inst, active_bids[i]);
+        ASSERT(ok, "Cancel active order must succeed");
+        cancelled_count++;
+    }
+    ASSERT(cancelled_count == 125, "Must have cancelled 125 orders");
+
+    // 4. Fill remaining resting orders with matching market sell orders
+    uint64_t before_trades = engine.getTotalTrades();
+    engine.addMarketOrder(inst, Side::Sell, 10000);
+
+    ASSERT(engine.getTotalTrades() > before_trades, "Must have executed fills against resting bids");
+}
+
+// ─────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────
 int main() {
@@ -518,6 +556,7 @@ int main() {
     RUN(test_cancel_nonexistent_order_rejection);
     RUN(test_orderbook_bit_63_boundary);
     RUN(test_modify_invalid_price_qty_preserves_resting_order);
+    RUN(test_order_lifecycle_rapid_churn);
 
     std::cout << "\n======================================\n";
     std::cout << "Results: " << passed << " passed, "

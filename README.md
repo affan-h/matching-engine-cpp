@@ -353,16 +353,16 @@ Per instrument (sample):
 
 ## Test Suites
 
-The project contains **110 automated test cases** across C++ and Python suites:
+The project contains **117 automated test cases** across C++ and Python suites:
 
-### 1. C++ Engine, Gateway & Read Model Tests (86 tests)
+### 1. C++ Engine, Gateway & Read Model Tests (93 tests)
 ```bash
 make test
 ```
-- **`test_engine` (22 tests)**: Core matching semantics (FIFO priority, price priority, GTC/IOC/FOK execution, partial fills, cancellations, multi-instrument isolation, invalid price/qty rejections, nonexistent cancel rejection reason codes, bit 63 word boundary precision, and order modify parameter validation preserving resting orders).
-- **`test_wire` (20 tests)**: Protocol framing, endian-safe serialization/deserialization, frame length validation, boundary conditions, malformed frame detection, Ping/Pong framing, and QueryStats decoding.
-- **`test_gateway` (29 tests)**: Real TCP socket integration via kqueue (server lifecycle, client connections, fragmented TCP frames, 1-byte delivery, multiple clients, backpressure, buffer overflow, TCP Ping/Pong, TCP queries for book/trades/orders/stats, correlation ID routing, shutdown with active clients, shutdown with partial frames, shutdown command drain, shutdown idempotency, rapid reconnect bursts, and deep book query over TCP).
-- **`test_read_model` (15 tests)**: ReadModel event application, monotonic global sequencing, FOK rejection reason codes, client correlation index lookup (`getOrderByClientId`), aggregate metrics computation (`getMetrics`), multi-reader thread safety, clean shutdown drain, order state regression prevention, client correlation eviction safety, and multi-instrument causal ordering.
+- **`test_engine` (23 tests)**: Core matching semantics (FIFO priority, price priority, GTC/IOC/FOK execution, partial fills, cancellations, multi-instrument isolation, invalid price/qty rejections, nonexistent cancel rejection reason codes, bit 63 word boundary precision, order modify parameter validation preserving resting orders, and rapid order lifecycle churn).
+- **`test_wire` (21 tests)**: Protocol framing, endian-safe serialization/deserialization, frame length validation, boundary conditions, malformed frame detection, Ping/Pong framing, QueryStats decoding, and adversarial fuzzed wire frames.
+- **`test_gateway` (32 tests)**: Real TCP socket integration via kqueue (server lifecycle, client connections, fragmented TCP frames, 1-byte delivery, multiple clients, backpressure, buffer overflow, TCP Ping/Pong, TCP queries for book/trades/orders/stats, correlation ID routing, shutdown with active clients, shutdown with partial frames, shutdown command drain, shutdown idempotency, rapid reconnect bursts, deep book queries over TCP, gateway start/stop/restart lifecycle cycles, sustained concurrent client load across 8 threads, and adversarial disconnect bursts during active traffic).
+- **`test_read_model` (17 tests)**: ReadModel event application, monotonic global sequencing, FOK rejection reason codes, client correlation index lookup (`getOrderByClientId`), aggregate metrics computation (`getMetrics`), multi-reader thread safety, clean shutdown drain, order state regression prevention, client correlation eviction safety, multi-instrument causal ordering, heavy concurrent readers with parallel writers (8 readers, 2 writers), and projector sustained backpressure with complete shutdown drain.
 
 ### 2. Python REST API Tests (24 tests)
 ```bash
@@ -517,10 +517,10 @@ tests/
   dashboard.cpp         Live ncurses terminal dashboard
   cli.cpp               Interactive CLI — all order types
   simulation.cpp        Multi-threaded producer/consumer, 5M orders
-  test_engine.cpp       22-case matching engine correctness suite
-  test_wire_protocol.cpp 20-case wire protocol & parser test suite
-  test_gateway.cpp      29-case TCP kqueue gateway integration test suite
-  test_read_model.cpp   15-case C++ ReadModel and Projector test suite
+  test_engine.cpp       23-case matching engine correctness suite
+  test_wire_protocol.cpp 21-case wire protocol & parser test suite
+  test_gateway.cpp      32-case TCP kqueue gateway integration test suite
+  test_read_model.cpp   17-case C++ ReadModel and Projector test suite
   test_api.py           24-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark latency suite with naive baseline
 ```
@@ -540,6 +540,8 @@ tests/
 9. **OrderBook Bit 63 Shift Undefined Behavior**: Fixed `findNextBid` where `(1ULL << (bit + 1)) - 1` invoked undefined behavior when `bit == 63`, ensuring word-boundary price levels are never masked to zero.
 10. **Order Modify Parameter Validation & Preservation**: Added upfront parameter validation in `modifyOrder` ensuring invalid prices or quantities emit `RejectCode::InvalidPriceQty` and preserve resting orders without corrupting the book, and eliminated duplicate snapshot publications.
 11. **Non-Blocking Socket Write Loop**: Replaced raw `send` in TCP gateway query handlers with a bounded `send_all_socket` loop handling `EAGAIN`/`EWOULDBLOCK` and preventing truncated response frames.
+12. **ThreadSanitizer Data Race Resolution**: Eliminated asynchronous races in `TcpGateway::stop` vs `runGateway` by converting listening socket and kqueue descriptors into atomic variables and utilizing atomic exchange for shutdown unblocking.
+13. **Defensive Non-Zero Capacity Guards**: Added non-zero capacity assertions in `BoundedTradeHistory` and `ReadModel` preventing modulo division-by-zero on edge configurations.
 
 ---
 

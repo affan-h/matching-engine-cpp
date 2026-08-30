@@ -542,6 +542,105 @@ TEST(test_multi_instrument_causal_sequencing) {
     projector.stop();
 }
 
+// 16. Heavy Concurrent Readers with Parallel Writers
+TEST(test_read_model_heavy_concurrent_reads_and_writes) {
+    ReadModel model(5000, 1000);
+    model.registerSymbol(0, "AAPL");
+    model.registerSymbol(1, "RELIANCE");
+
+    std::atomic<bool> start_signal{false};
+    std::atomic<bool> done{false};
+    constexpr int NUM_READERS = 8;
+    constexpr int NUM_WRITERS = 2;
+    constexpr int EVENTS_PER_WRITER = 1000;
+
+    std::vector<std::thread> readers;
+    for (int r = 0; r < NUM_READERS; ++r) {
+        readers.emplace_back([&model, &start_signal, &done]() {
+            while (!start_signal.load(std::memory_order_relaxed)) {
+                std::this_thread::yield();
+            }
+            while (!done.load(std::memory_order_relaxed)) {
+                L2BookState book;
+                model.getL2Book(0, book);
+
+                std::vector<TradeRecord> trades;
+                model.getRecentTrades(0, 10, trades);
+
+                OrderRecord ord;
+                model.getOrder(1, ord);
+
+                EngineMetrics m;
+                model.getMetrics(m);
+            }
+        });
+    }
+
+    std::vector<std::thread> writers;
+    for (int w = 0; w < NUM_WRITERS; ++w) {
+        writers.emplace_back([&model, &start_signal, w]() {
+            while (!start_signal.load(std::memory_order_relaxed)) {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < EVENTS_PER_WRITER; ++i) {
+                events::OutboundEvent evt;
+                evt.type = events::OutboundEventType::Trade;
+                evt.trade.trade_id = static_cast<uint64_t>(w * EVENTS_PER_WRITER + i + 1);
+                evt.trade.instrument_id = 0;
+                evt.trade.price = 150;
+                evt.trade.quantity = 10;
+                evt.trade.sequence = static_cast<uint64_t>(w * EVENTS_PER_WRITER + i + 1);
+                model.applyEvent(evt);
+            }
+        });
+    }
+
+    start_signal.store(true, std::memory_order_release);
+    for (auto& th : writers) {
+        th.join();
+    }
+    done.store(true, std::memory_order_release);
+    for (auto& th : readers) {
+        th.join();
+    }
+
+    EngineMetrics metrics;
+    model.getMetrics(metrics);
+    assert(metrics.total_trades == (NUM_WRITERS * EVENTS_PER_WRITER));
+}
+
+// 17. Projector Sustained Backpressure and Complete Shutdown Drain
+TEST(test_projector_sustained_backpressure_and_drain) {
+    ReadModel model(10000, 5000);
+    model.registerSymbol(0, "AAPL");
+
+    OutboundEventQueue queue(8192);
+    constexpr int TOTAL_EVENTS = 5000;
+
+    for (int i = 1; i <= TOTAL_EVENTS; ++i) {
+        events::OutboundEvent evt;
+        evt.type = events::OutboundEventType::Trade;
+        evt.trade.trade_id = i;
+        evt.trade.instrument_id = 0;
+        evt.trade.price = 100 + (i % 50);
+        evt.trade.quantity = 5;
+        evt.trade.sequence = i;
+        bool pushed = queue.push(evt);
+        assert(pushed);
+    }
+
+    Projector projector(queue, model);
+    projector.start();
+
+    // Stop projector and assert 100% drain
+    projector.stop();
+
+    EngineMetrics metrics;
+    model.getMetrics(metrics);
+    assert(metrics.total_trades == TOTAL_EVENTS);
+    assert(projector.getStats().trades_projected.load() == TOTAL_EVENTS);
+}
+
 int main() {
     std::cout << "\n===== Read Model & Projector Test Suite =====\n\n";
 
@@ -560,6 +659,8 @@ int main() {
     RUN_TEST(test_order_state_regression_prevention);
     RUN_TEST(test_client_order_id_eviction_safety);
     RUN_TEST(test_multi_instrument_causal_sequencing);
+    RUN_TEST(test_read_model_heavy_concurrent_reads_and_writes);
+    RUN_TEST(test_projector_sustained_backpressure_and_drain);
 
     std::cout << "\n=============================================\n";
     std::cout << "Results: " << passed << " passed, 0 failed\n\n";

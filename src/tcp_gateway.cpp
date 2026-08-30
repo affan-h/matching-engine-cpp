@@ -34,8 +34,8 @@ bool TcpGateway::start() {
     }
 
     // 1. Create TCP listening socket
-    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) {
+    int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) {
         std::cerr << "[TcpGateway] socket() failed: " << errno << "\n";
         is_running.store(false, std::memory_order_release);
         return false;
@@ -43,17 +43,16 @@ bool TcpGateway::start() {
 
     // 2. Set SO_REUSEADDR and SO_REUSEPORT
     int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #ifdef SO_REUSEPORT
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
 
     // 3. Set non-blocking mode
-    int flags = fcntl(listen_fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    int flags = ::fcntl(lfd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(lfd, F_SETFL, flags | O_NONBLOCK) < 0) {
         std::cerr << "[TcpGateway] fcntl(O_NONBLOCK) failed\n";
-        close(listen_fd);
-        listen_fd = -1;
+        ::close(lfd);
         is_running.store(false, std::memory_order_release);
         return false;
     }
@@ -62,18 +61,16 @@ bool TcpGateway::start() {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(config.port));
-    if (inet_pton(AF_INET, config.host.c_str(), &addr.sin_addr) <= 0) {
+    if (::inet_pton(AF_INET, config.host.c_str(), &addr.sin_addr) <= 0) {
         std::cerr << "[TcpGateway] inet_pton failed for host: " << config.host << "\n";
-        close(listen_fd);
-        listen_fd = -1;
+        ::close(lfd);
         is_running.store(false, std::memory_order_release);
         return false;
     }
 
-    if (bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    if (::bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "[TcpGateway] bind() failed on port " << config.port << ": " << errno << "\n";
-        close(listen_fd);
-        listen_fd = -1;
+        ::close(lfd);
         is_running.store(false, std::memory_order_release);
         return false;
     }
@@ -81,43 +78,42 @@ bool TcpGateway::start() {
     // 5. Retrieve dynamic port if ephemeral (port 0)
     sockaddr_in bound_addr{};
     socklen_t bound_len = sizeof(bound_addr);
-    if (getsockname(listen_fd, reinterpret_cast<sockaddr*>(&bound_addr), &bound_len) == 0) {
+    if (::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound_addr), &bound_len) == 0) {
         bound_port = ntohs(bound_addr.sin_port);
     } else {
         bound_port = config.port;
     }
 
     // 6. Listen backlog
-    if (listen(listen_fd, 1024) < 0) {
+    if (::listen(lfd, 1024) < 0) {
         std::cerr << "[TcpGateway] listen() failed: " << errno << "\n";
-        close(listen_fd);
-        listen_fd = -1;
+        ::close(lfd);
         is_running.store(false, std::memory_order_release);
         return false;
     }
 
     // 7. Create kqueue
-    kq_fd = kqueue();
-    if (kq_fd < 0) {
+    int kfd = ::kqueue();
+    if (kfd < 0) {
         std::cerr << "[TcpGateway] kqueue() failed: " << errno << "\n";
-        close(listen_fd);
-        listen_fd = -1;
+        ::close(lfd);
         is_running.store(false, std::memory_order_release);
         return false;
     }
 
-    // 8. Register listen_fd with kqueue for read events
+    // 8. Register lfd with kqueue for read events
     struct kevent ev{};
-    EV_SET(&ev, listen_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-    if (kevent(kq_fd, &ev, 1, nullptr, 0, nullptr) < 0) {
+    EV_SET(&ev, lfd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
+    if (::kevent(kfd, &ev, 1, nullptr, 0, nullptr) < 0) {
         std::cerr << "[TcpGateway] kevent(listen_fd) failed: " << errno << "\n";
-        close(kq_fd);
-        close(listen_fd);
-        listen_fd = -1;
-        kq_fd = -1;
+        ::close(kfd);
+        ::close(lfd);
         is_running.store(false, std::memory_order_release);
         return false;
     }
+
+    listen_fd.store(lfd, std::memory_order_release);
+    kq_fd.store(kfd, std::memory_order_release);
 
     // 9. Launch threads: Gateway Event Loop + Engine Consumer
     gateway_thread = std::thread(&TcpGateway::runGateway, this);
@@ -132,15 +128,15 @@ void TcpGateway::stop() {
         return;
     }
 
-    // Close listen socket and kqueue to unblock kevent()
-    if (listen_fd >= 0) {
-        close(listen_fd);
-        listen_fd = -1;
+    // Close listen socket and kqueue to unblock kevent() atomically
+    int lfd = listen_fd.exchange(-1, std::memory_order_acq_rel);
+    if (lfd >= 0) {
+        close(lfd);
     }
 
-    if (kq_fd >= 0) {
-        close(kq_fd);
-        kq_fd = -1;
+    int kfd = kq_fd.exchange(-1, std::memory_order_acq_rel);
+    if (kfd >= 0) {
+        close(kfd);
     }
 
     // Join threads
@@ -158,6 +154,7 @@ void TcpGateway::stop() {
         }
     }
     clients.clear();
+    active_clients.store(0, std::memory_order_release);
 }
 
 void TcpGateway::closeClient(int fd) {
@@ -165,6 +162,9 @@ void TcpGateway::closeClient(int fd) {
     if (it != clients.end()) {
         close(fd);
         clients.erase(it);
+        if (active_clients > 0) {
+            active_clients--;
+        }
         stats.connections_closed++;
     }
 }
@@ -250,22 +250,27 @@ void TcpGateway::runGateway() {
     timeout.tv_nsec = 100000000; // 100 ms
 
     while (is_running.load(std::memory_order_relaxed)) {
-        int n_events = kevent(kq_fd, nullptr, 0, event_list, MAX_EVENTS, &timeout);
+        int cur_kq = kq_fd.load(std::memory_order_acquire);
+        if (cur_kq < 0) break;
+
+        int n_events = kevent(cur_kq, nullptr, 0, event_list, MAX_EVENTS, &timeout);
 
         if (n_events < 0) {
             if (errno == EINTR) continue;
             break; // Socket closed or error during shutdown
         }
 
+        int cur_listen = listen_fd.load(std::memory_order_acquire);
+
         for (int i = 0; i < n_events; ++i) {
             int fd = static_cast<int>(event_list[i].ident);
 
-            if (fd == listen_fd) {
+            if (cur_listen >= 0 && fd == cur_listen) {
                 // Accept new client connections in a non-blocking loop
                 while (true) {
                     sockaddr_in client_addr{};
                     socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+                    int client_fd = accept(cur_listen, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
 
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -289,10 +294,12 @@ void TcpGateway::runGateway() {
                     // Register client with kqueue for read events
                     struct kevent client_ev{};
                     EV_SET(&client_ev, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-                    if (kevent(kq_fd, &client_ev, 1, nullptr, 0, nullptr) == 0) {
+                    int reg_kq = kq_fd.load(std::memory_order_acquire);
+                    if (reg_kq >= 0 && kevent(reg_kq, &client_ev, 1, nullptr, 0, nullptr) == 0) {
                         ClientConnection conn;
                         conn.fd = client_fd;
                         clients[client_fd] = std::move(conn);
+                        active_clients++;
                         stats.connections_accepted++;
                     } else {
                         close(client_fd);

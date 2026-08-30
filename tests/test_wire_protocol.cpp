@@ -533,6 +533,47 @@ TEST(test_query_stats_frame_parsing) {
 }
 
 // ─────────────────────────────────────────────
+// 21. Adversarial Fuzzed Wire Frames
+// ─────────────────────────────────────────────
+TEST(test_adversarial_fuzzed_wire_frames) {
+    // 1. Frame with payload_len = 0 but msg_type = 0x01 (requires 24 bytes)
+    {
+        uint8_t raw[] = {0x00, 0x00, 0x01};
+        TcpParser parser;
+        parser.append(raw, sizeof(raw));
+        ParsedFrame frame{};
+        ParseError error = ParseError::None;
+        ParseStatus st = parser.parseNextFrame(frame, error);
+        ASSERT(st == ParseStatus::Error, "Must reject zero payload len for LimitOrder");
+        ASSERT(error == ParseError::InvalidPayloadLength, "Expected InvalidPayloadLength");
+    }
+
+    // 2. Frame with payload_len = 129 (exceeding MAX_PAYLOAD_LENGTH 128)
+    {
+        uint8_t raw[] = {0x00, 0x81, 0x01};
+        TcpParser parser;
+        parser.append(raw, sizeof(raw));
+        ParsedFrame frame{};
+        ParseError error = ParseError::None;
+        ParseStatus st = parser.parseNextFrame(frame, error);
+        ASSERT(st == ParseStatus::Error, "Must reject payload > 128 bytes");
+        ASSERT(error == ParseError::PayloadTooLarge, "Expected PayloadTooLarge");
+    }
+
+    // 3. Corrupt message type 0xFF
+    {
+        uint8_t raw[] = {0x00, 0x04, 0xFF, 0x01, 0x02, 0x03, 0x04};
+        TcpParser parser;
+        parser.append(raw, sizeof(raw));
+        ParsedFrame frame{};
+        ParseError error = ParseError::None;
+        ParseStatus st = parser.parseNextFrame(frame, error);
+        ASSERT(st == ParseStatus::Error, "Must reject unknown message type");
+        ASSERT(error == ParseError::UnknownMessageType, "Expected UnknownMessageType");
+    }
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -558,6 +599,7 @@ int main() {
     RUN(test_truncated_frame_disconnect);
     RUN(test_ping_pong_frame_parsing);
     RUN(test_query_stats_frame_parsing);
+    RUN(test_adversarial_fuzzed_wire_frames);
 
     std::cout << "\n=================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

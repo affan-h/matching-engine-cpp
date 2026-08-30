@@ -1016,6 +1016,138 @@ TEST(test_query_book_deep_levels_over_tcp) {
 }
 
 // ─────────────────────────────────────────────
+// 30. Gateway Start/Stop/Restart Lifecycle Cycle
+// ─────────────────────────────────────────────
+TEST(test_gateway_start_stop_restart_cycle) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        ASSERT(gateway.start(), "Gateway must start cleanly");
+        ASSERT(gateway.isRunning(), "Gateway isRunning must be true");
+
+        int port = gateway.getBoundPort();
+        int client = connect_client(port);
+        ASSERT(client >= 0, "Client must connect");
+
+        auto frame = wire::encode_limit_order(aapl, Side::Buy, 150, 10, TimeInForce::GTC, 1000 + cycle);
+        send_all(client, frame);
+        close(client);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        gateway.stop();
+        ASSERT(!gateway.isRunning(), "Gateway isRunning must be false after stop");
+    }
+}
+
+// ─────────────────────────────────────────────
+// 31. Sustained Concurrent Client Load
+// ─────────────────────────────────────────────
+TEST(test_gateway_sustained_concurrent_client_load) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(1000, 1000);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    SPSCQueue queue(65536);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    constexpr int NUM_THREADS = 8;
+    constexpr int ORDERS_PER_THREAD = 100;
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&gateway, aapl, t]() {
+            int client = connect_client(gateway.getBoundPort());
+            if (client < 0) return;
+
+            for (int i = 0; i < ORDERS_PER_THREAD; ++i) {
+                uint64_t cl_id = static_cast<uint64_t>(t * 10000 + i + 1);
+                auto frame = (i % 2 == 0)
+                    ? wire::encode_limit_order(aapl, Side::Buy, 100 + (i % 10), 5, TimeInForce::GTC, cl_id)
+                    : wire::encode_limit_order(aapl, Side::Sell, 100 + (i % 10), 5, TimeInForce::GTC, cl_id);
+                send_all(client, frame);
+
+                if (i % 25 == 0) {
+                    auto ping = wire::encode_ping(cl_id);
+                    send_all(client, ping);
+                    recv_response(client);
+                }
+            }
+            close(client);
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    // Wait for consumer to process all events
+    while (gateway.getStats().events_processed.load() < (NUM_THREADS * ORDERS_PER_THREAD)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    ASSERT(gateway.getStats().events_processed.load() >= (NUM_THREADS * ORDERS_PER_THREAD), "All orders processed");
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 32. Adversarial Disconnect Burst During Active Traffic
+// ─────────────────────────────────────────────
+TEST(test_gateway_adversarial_disconnect_burst_during_active_traffic) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    constexpr int NUM_BURSTS = 20;
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < NUM_BURSTS; ++i) {
+        threads.emplace_back([&gateway, aapl, i]() {
+            int client = connect_client(gateway.getBoundPort());
+            if (client < 0) return;
+
+            auto frame = wire::encode_limit_order(aapl, Side::Buy, 100, 10, TimeInForce::GTC, i + 1);
+            // Send partial frame (first 5 bytes of 27-byte frame)
+            if (frame.size() > 5) {
+                ::send(client, frame.data(), 5, 0);
+            }
+            // Abrupt disconnect
+            close(client);
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    // Send a valid order from a healthy client to verify gateway remains operational
+    int health_client = connect_client(gateway.getBoundPort());
+    ASSERT(health_client >= 0, "Healthy client must connect after disconnect burst");
+    auto ping = wire::encode_ping(9999);
+    send_all(health_client, ping);
+    auto [type, payload] = recv_response(health_client);
+    ASSERT(type == wire::MessageType::Pong, "Gateway must remain responsive");
+    close(health_client);
+
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -1051,6 +1183,9 @@ int main() {
     RUN(test_shutdown_idempotency);
     RUN(test_rapid_reconnect_burst);
     RUN(test_query_book_deep_levels_over_tcp);
+    RUN(test_gateway_start_stop_restart_cycle);
+    RUN(test_gateway_sustained_concurrent_client_load);
+    RUN(test_gateway_adversarial_disconnect_burst_during_active_traffic);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

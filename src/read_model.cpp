@@ -2,7 +2,8 @@
 #include <algorithm>
 
 ReadModel::ReadModel(size_t max_orders_cap, size_t max_trades_cap)
-    : max_orders(max_orders_cap), max_trades_per_symbol(max_trades_cap) {}
+    : max_orders(max_orders_cap == 0 ? 1 : max_orders_cap),
+      max_trades_per_symbol(max_trades_cap == 0 ? 1 : max_trades_cap) {}
 
 void ReadModel::registerSymbol(InstrumentId id, const std::string& symbol) {
     std::unique_lock<std::shared_mutex> lock(rw_mutex);

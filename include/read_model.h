@@ -80,7 +80,7 @@ private:
 
 public:
     explicit BoundedTradeHistory(size_t cap = 1000)
-        : buffer(cap), capacity(cap), head(0), count(0) {}
+        : buffer(cap == 0 ? 1 : cap), capacity(cap == 0 ? 1 : cap), head(0), count(0) {}
 
     void add(const TradeRecord& trade) {
         buffer[head] = trade;

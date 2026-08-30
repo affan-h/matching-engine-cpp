@@ -56,13 +56,14 @@ private:
     GatewayConfig   config;
     ReadModel*      read_model{nullptr};
 
-    int listen_fd = -1;
-    int kq_fd     = -1;
+    std::atomic<int> listen_fd{-1};
+    std::atomic<int> kq_fd{-1};
     int bound_port = 0;
 
-    std::atomic<bool> is_running{false};
-    std::thread       gateway_thread;
-    std::thread       consumer_thread;
+    std::atomic<bool>   is_running{false};
+    std::atomic<size_t> active_clients{0};
+    std::thread         gateway_thread;
+    std::thread         consumer_thread;
 
     std::unordered_map<int, ClientConnection> clients;
     GatewayStats stats;
@@ -95,6 +96,6 @@ public:
     // Accessors
     bool isRunning() const { return is_running.load(); }
     int getBoundPort() const { return bound_port; }
-    size_t getClientCount() const { return clients.size(); }
+    size_t getClientCount() const { return active_clients.load(std::memory_order_relaxed); }
     const GatewayStats& getStats() const { return stats; }
 };
