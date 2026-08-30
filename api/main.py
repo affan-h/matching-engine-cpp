@@ -15,6 +15,7 @@ from api.models import (
     TradeItem,
     TradesResponse,
     OrderStateResponse,
+    SystemMetricsResponse,
     HealthResponse,
     GatewayStatus,
     OrderTypeEnum,
@@ -53,7 +54,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Matching Engine HTTP REST API",
     description="Client-facing HTTP adapter communicating with the C++ kqueue Matching Engine Gateway & Read Model via explicit binary wire protocol.",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -103,6 +104,7 @@ def create_order(
     symbol = req.symbol.upper()
     side_str = req.side.value
     order_type_str = req.order_type.value
+    cl_ord_id = req.client_order_id or 0
 
     if req.order_type == OrderTypeEnum.LIMIT:
         tif_str = req.time_in_force.value if req.time_in_force else "GTC"
@@ -112,11 +114,13 @@ def create_order(
             price=req.price,
             quantity=req.quantity,
             tif=tif_str,
+            client_order_id=cl_ord_id,
         )
         return OrderResponse(
             status="ACCEPTED",
             symbol=symbol,
             instrument_id=inst_id,
+            client_order_id=req.client_order_id,
             side=side_str,
             order_type=order_type_str,
             price=req.price,
@@ -129,11 +133,13 @@ def create_order(
             symbol=symbol,
             side=side_str,
             quantity=req.quantity,
+            client_order_id=cl_ord_id,
         )
         return OrderResponse(
             status="ACCEPTED",
             symbol=symbol,
             instrument_id=inst_id,
+            client_order_id=req.client_order_id,
             side=side_str,
             order_type=order_type_str,
             price=0,
@@ -152,6 +158,7 @@ def create_order(
 def cancel_order(
     order_id: int = Path(..., ge=1, description="Order ID to cancel (>= 1)"),
     symbol: str = Query("AAPL", description="Instrument symbol (AAPL, RELIANCE, INFY, TATASTEEL)"),
+    client_order_id: Optional[int] = Query(None, ge=1, description="Optional client correlation ID"),
     gateway: GatewayTcpClient = Depends(get_gateway_client),
 ):
     symbol_upper = symbol.strip().upper()
@@ -162,12 +169,17 @@ def cancel_order(
             detail=f"Unknown symbol '{symbol}'. Valid symbols: {valid_symbols}",
         )
 
-    inst_id = gateway.submit_cancel_order(symbol=symbol_upper, order_id=order_id)
+    inst_id = gateway.submit_cancel_order(
+        symbol=symbol_upper,
+        order_id=order_id,
+        client_order_id=client_order_id or 0,
+    )
     return CancelResponse(
         status="ACCEPTED",
         symbol=symbol_upper,
         instrument_id=inst_id,
         order_id=order_id,
+        client_order_id=client_order_id,
         message="Cancel request successfully submitted to matching engine gateway",
     )
 
@@ -189,12 +201,14 @@ def modify_order(
         order_id=order_id,
         new_price=req.new_price,
         new_quantity=req.new_quantity,
+        client_order_id=req.client_order_id or 0,
     )
     return ModifyResponse(
         status="ACCEPTED",
         symbol=symbol_upper,
         instrument_id=inst_id,
         order_id=order_id,
+        client_order_id=req.client_order_id,
         new_price=req.new_price,
         new_quantity=req.new_quantity,
         message="Modify request successfully submitted to matching engine gateway",
@@ -268,16 +282,44 @@ def get_trades(
     summary="Get Order Status and Fill History from Read Model",
 )
 def get_order(
-    order_id: int = Path(..., ge=1, description="Order ID to query (>= 1)"),
+    order_id: int = Path(..., ge=1, description="Order ID or Client Order ID to query (>= 1)"),
+    by_client_id: bool = Query(False, description="Whether order_id represents client_order_id"),
     gateway: GatewayTcpClient = Depends(get_gateway_client),
 ):
-    order_data = gateway.query_order(order_id)
+    order_data = gateway.query_order(order_id, by_client_id=by_client_id)
     if order_data is None:
+        target_name = "Client Order ID" if by_client_id else "Order ID"
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Order {order_id} not found in read model",
+            detail=f"{target_name} {order_id} not found in read model",
         )
     return OrderStateResponse(**order_data)
+
+
+@app.get(
+    "/metrics",
+    response_model=SystemMetricsResponse,
+    summary="Platform Execution & Read Model Metrics",
+)
+@app.get(
+    "/stats",
+    response_model=SystemMetricsResponse,
+    summary="Platform Execution & Read Model Stats",
+)
+def get_metrics(
+    gateway: GatewayTcpClient = Depends(get_gateway_client),
+):
+    try:
+        stats_data = gateway.query_stats()
+        return SystemMetricsResponse(
+            **stats_data,
+            gateway_connected=True,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Cannot fetch metrics from gateway: {e}",
+        )
 
 
 @app.get(

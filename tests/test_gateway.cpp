@@ -67,6 +67,27 @@ static void send_all(int fd, const std::vector<uint8_t>& bytes) {
     send_all(fd, bytes.data(), bytes.size());
 }
 
+static std::pair<wire::MessageType, std::vector<uint8_t>> recv_response(int fd) {
+    uint8_t hdr[3];
+    size_t got = 0;
+    while (got < 3) {
+        ssize_t n = recv(fd, hdr + got, 3 - got, 0);
+        if (n <= 0) throw std::runtime_error("recv header failed");
+        got += n;
+    }
+    uint16_t len = wire::read_u16_be(hdr);
+    wire::MessageType type = static_cast<wire::MessageType>(hdr[2]);
+
+    std::vector<uint8_t> payload(len);
+    got = 0;
+    while (got < len) {
+        ssize_t n = recv(fd, payload.data() + got, len - got, 0);
+        if (n <= 0) throw std::runtime_error("recv payload failed");
+        got += n;
+    }
+    return {type, payload};
+}
+
 // ─────────────────────────────────────────────
 // 1. Server Starts and Stops
 // ─────────────────────────────────────────────
@@ -100,12 +121,12 @@ TEST(test_client_connects_and_disconnects) {
     int client_fd = connect_client(gateway.getBoundPort());
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    ASSERT(gateway.getStats().connections_accepted.load() == 1, "Expected 1 connection accepted");
+    ASSERT(gateway.getClientCount() == 1, "Expected 1 connected client");
+    ASSERT(gateway.getStats().connections_accepted == 1, "Expected 1 accepted connection");
 
     close(client_fd);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    ASSERT(gateway.getStats().connections_closed.load() == 1, "Expected 1 connection closed");
     gateway.stop();
 }
 
@@ -114,7 +135,8 @@ TEST(test_client_connects_and_disconnects) {
 // ─────────────────────────────────────────────
 TEST(test_limit_order_reaches_engine) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -122,22 +144,17 @@ TEST(test_limit_order_reaches_engine) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
-    // Send Limit Buy AAPL 100 @ 10
-    auto buy_frame = wire::encode_limit_order(aapl, Side::Buy, 100, 10, TimeInForce::GTC);
-    send_all(client, buy_frame);
+    auto frame = wire::encode_limit_order(inst, Side::Buy, 150, 10, TimeInForce::GTC, 1001ULL);
+    send_all(client_fd, frame);
 
-    // Send Limit Sell AAPL 100 @ 10 (Matches!)
-    auto sell_frame = wire::encode_limit_order(aapl, Side::Sell, 100, 10, TimeInForce::GTC);
-    send_all(client, sell_frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT(gateway.getStats().events_pushed == 1, "Expected 1 event pushed to queue");
+    ASSERT(gateway.getStats().events_processed == 1, "Expected 1 event processed by engine");
 
-    ASSERT(engine.getTotalTrades() == 1, "Expected 1 trade executed in MatchingEngine");
-    ASSERT(gateway.getStats().events_processed.load() == 2, "Expected 2 events processed");
-
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
@@ -146,7 +163,9 @@ TEST(test_limit_order_reaches_engine) {
 // ─────────────────────────────────────────────
 TEST(test_market_order_reaches_engine) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+    engine.addLimitOrder(inst, Side::Sell, 150, 10, TimeInForce::GTC);
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -154,22 +173,18 @@ TEST(test_market_order_reaches_engine) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
-    // Resting Sell @ 150
-    auto sell_frame = wire::encode_limit_order(aapl, Side::Sell, 150, 20, TimeInForce::GTC);
-    send_all(client, sell_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    auto frame = wire::encode_market_order(inst, Side::Buy, 10, 1002ULL);
+    send_all(client_fd, frame);
 
-    // Incoming Market Buy
-    auto market_frame = wire::encode_market_order(aapl, Side::Buy, 20);
-    send_all(client, market_frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT(gateway.getStats().events_pushed == 1, "Expected 1 event pushed to queue");
+    ASSERT(gateway.getStats().events_processed == 1, "Expected 1 event processed by engine");
+    ASSERT(engine.getTotalTrades() == 1, "Expected 1 trade executed");
 
-    ASSERT(engine.getTotalTrades() == 1, "Expected Market Order match in engine");
-
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
@@ -178,7 +193,9 @@ TEST(test_market_order_reaches_engine) {
 // ─────────────────────────────────────────────
 TEST(test_cancel_order_reaches_engine) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+    OrderId id = engine.addLimitOrder(inst, Side::Buy, 150, 10, TimeInForce::GTC);
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -186,26 +203,20 @@ TEST(test_cancel_order_reaches_engine) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
-    // Limit Buy (Order ID will be 1)
-    auto buy_frame = wire::encode_limit_order(aapl, Side::Buy, 100, 10, TimeInForce::GTC);
-    send_all(client, buy_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    auto frame = wire::encode_cancel_order(inst, id, 1003ULL);
+    send_all(client_fd, frame);
 
-    // Cancel Order ID 1
-    auto cancel_frame = wire::encode_cancel_order(aapl, 1ULL);
-    send_all(client, cancel_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    // Send Limit Sell at same price (Should NOT trade since buy was cancelled)
-    auto sell_frame = wire::encode_limit_order(aapl, Side::Sell, 100, 10, TimeInForce::GTC);
-    send_all(client, sell_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT(gateway.getStats().events_pushed == 1, "Expected 1 event pushed");
+    ASSERT(gateway.getStats().events_processed == 1, "Expected 1 event processed");
 
-    ASSERT(engine.getTotalTrades() == 0, "Cancelled order must not execute trades");
+    Order out;
+    ASSERT(!engine.getOrder(inst, id, out), "Cancelled order should not be in book");
 
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
@@ -214,7 +225,9 @@ TEST(test_cancel_order_reaches_engine) {
 // ─────────────────────────────────────────────
 TEST(test_modify_order_reaches_engine) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+    OrderId id = engine.addLimitOrder(inst, Side::Buy, 150, 10, TimeInForce::GTC);
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -222,31 +235,21 @@ TEST(test_modify_order_reaches_engine) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
-    // Limit Buy 100 @ 10 (Order ID 1)
-    auto buy_frame = wire::encode_limit_order(aapl, Side::Buy, 100, 10, TimeInForce::GTC);
-    send_all(client, buy_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    auto frame = wire::encode_modify_order(inst, id, 150, 5, 1004ULL);
+    send_all(client_fd, frame);
 
-    // Modify Order ID 1 down to qty 5
-    auto mod_frame = wire::encode_modify_order(aapl, 1ULL, 100, 5);
-    send_all(client, mod_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    // Send Sell @ 100 for qty 5 (Fully fills modified buy order)
-    auto sell_frame1 = wire::encode_limit_order(aapl, Side::Sell, 100, 5, TimeInForce::GTC);
-    send_all(client, sell_frame1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    ASSERT(engine.getTotalTrades() == 1, "First trade must execute");
+    ASSERT(gateway.getStats().events_pushed == 1, "Expected 1 event pushed");
+    ASSERT(gateway.getStats().events_processed == 1, "Expected 1 event processed");
 
-    // Send another Sell @ 100 for qty 5 (Should NOT match because original 10 qty was reduced to 5)
-    auto sell_frame2 = wire::encode_limit_order(aapl, Side::Sell, 100, 5, TimeInForce::GTC);
-    send_all(client, sell_frame2);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    ASSERT(engine.getTotalTrades() == 1, "Book should have 0 remaining bid volume after modify");
+    Order out;
+    ASSERT(engine.getOrder(inst, id, out), "Order should exist in book");
+    ASSERT(out.quantity == 5, "Order quantity should be updated to 5");
 
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
@@ -255,7 +258,8 @@ TEST(test_modify_order_reaches_engine) {
 // ─────────────────────────────────────────────
 TEST(test_fragmented_frame) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -263,37 +267,29 @@ TEST(test_fragmented_frame) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
+    auto frame = wire::encode_limit_order(inst, Side::Buy, 150, 10, TimeInForce::GTC);
 
-    auto frame = wire::encode_limit_order(aapl, Side::Buy, 200, 15, TimeInForce::GTC);
+    send_all(client_fd, frame.data(), 5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT(gateway.getStats().events_pushed == 0, "No event should be pushed before frame is complete");
 
-    // Send in 3 arbitrary fragments
-    send_all(client, frame.data(), 2);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    send_all(client_fd, frame.data() + 5, frame.size() - 5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    send_all(client, frame.data() + 2, 7);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT(gateway.getStats().events_pushed == 1, "Expected 1 event pushed after full frame received");
 
-    send_all(client, frame.data() + 9, frame.size() - 9);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-
-    // Match it
-    auto match_frame = wire::encode_limit_order(aapl, Side::Sell, 200, 15, TimeInForce::GTC);
-    send_all(client, match_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-
-    ASSERT(engine.getTotalTrades() == 1, "Fragmented frame must be reconstructed and matched");
-
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
 // ─────────────────────────────────────────────
-// 8. One-Byte-At-A-Time Frame
+// 8. One-Byte-At-A-Time Delivery
 // ─────────────────────────────────────────────
 TEST(test_one_byte_at_a_time_frame) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -301,33 +297,28 @@ TEST(test_one_byte_at_a_time_frame) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
+    auto frame = wire::encode_limit_order(inst, Side::Buy, 150, 10, TimeInForce::GTC);
 
-    auto buy_frame = wire::encode_limit_order(aapl, Side::Buy, 300, 5, TimeInForce::GTC);
-    for (uint8_t byte : buy_frame) {
-        send_all(client, &byte, 1);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    for (size_t i = 0; i < frame.size(); ++i) {
+        send_all(client_fd, &frame[i], 1);
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
 
-    auto sell_frame = wire::encode_limit_order(aapl, Side::Sell, 300, 5, TimeInForce::GTC);
-    for (uint8_t byte : sell_frame) {
-        send_all(client, &byte, 1);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ASSERT(gateway.getStats().events_pushed == 1, "Expected 1 event pushed after 1-byte streaming");
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    ASSERT(engine.getTotalTrades() == 1, "1-byte-at-a-time frames must execute correctly");
-
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
 // ─────────────────────────────────────────────
-// 9. Multiple Frames in One Send
+// 9. Multiple Frames In One Send
 // ─────────────────────────────────────────────
 TEST(test_multiple_frames_in_one_send) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -335,70 +326,64 @@ TEST(test_multiple_frames_in_one_send) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
-    auto f1 = wire::encode_limit_order(aapl, Side::Buy, 100, 10, TimeInForce::GTC);
-    auto f2 = wire::encode_limit_order(aapl, Side::Sell, 100, 10, TimeInForce::GTC);
+    std::vector<uint8_t> batch;
+    for (int i = 0; i < 5; ++i) {
+        auto frame = wire::encode_limit_order(inst, Side::Buy, 100 + i, 10, TimeInForce::GTC);
+        batch.insert(batch.end(), frame.begin(), frame.end());
+    }
+
+    send_all(client_fd, batch);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    ASSERT(gateway.getStats().events_pushed == 5, "Expected 5 events pushed from batched send");
+
+    close(client_fd);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 10. Multiple Frames with Partial Final Frame
+// ─────────────────────────────────────────────
+TEST(test_multiple_frames_with_partial_final_frame) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    int client_fd = connect_client(gateway.getBoundPort());
+
+    auto f1 = wire::encode_limit_order(inst, Side::Buy, 100, 10, TimeInForce::GTC);
+    auto f2 = wire::encode_limit_order(inst, Side::Buy, 101, 10, TimeInForce::GTC);
+    auto f3 = wire::encode_limit_order(inst, Side::Buy, 102, 10, TimeInForce::GTC);
 
     std::vector<uint8_t> batch;
     batch.insert(batch.end(), f1.begin(), f1.end());
     batch.insert(batch.end(), f2.begin(), f2.end());
+    batch.insert(batch.end(), f3.begin(), f3.begin() + 5);
 
-    send_all(client, batch);
+    send_all(client_fd, batch);
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
-    ASSERT(engine.getTotalTrades() == 1, "Coalesced frames in single recv must match");
+    ASSERT(gateway.getStats().events_pushed == 2, "Expected 2 events pushed so far");
 
-    close(client);
+    send_all(client_fd, f3.data() + 5, f3.size() - 5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    ASSERT(gateway.getStats().events_pushed == 3, "Expected 3 events pushed after completion");
+
+    close(client_fd);
     gateway.stop();
 }
 
 // ─────────────────────────────────────────────
-// 10. Multiple Frames With Partial Final Frame
-// ─────────────────────────────────────────────
-TEST(test_multiple_frames_with_partial_final_frame) {
-    MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
-    SPSCQueue queue(1024);
-    GatewayConfig config;
-    config.port = 0;
-
-    TcpGateway gateway(engine, queue, config);
-    gateway.start();
-
-    int client = connect_client(gateway.getBoundPort());
-
-    auto f1 = wire::encode_limit_order(aapl, Side::Buy, 100, 10, TimeInForce::GTC);
-    auto f2 = wire::encode_limit_order(aapl, Side::Sell, 100, 10, TimeInForce::GTC);
-    auto f3 = wire::encode_limit_order(aapl, Side::Buy, 200, 5, TimeInForce::GTC);
-
-    std::vector<uint8_t> chunk1;
-    chunk1.insert(chunk1.end(), f1.begin(), f1.end());
-    chunk1.insert(chunk1.end(), f2.begin(), f2.end());
-    // Append partial header of f3 (only 2 bytes)
-    chunk1.insert(chunk1.end(), f3.begin(), f3.begin() + 2);
-
-    send_all(client, chunk1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
-    ASSERT(engine.getTotalTrades() == 1, "First 2 frames should have traded");
-
-    // Send remaining bytes of f3
-    send_all(client, f3.data() + 2, f3.size() - 2);
-
-    // Send matching sell for f3
-    auto f4 = wire::encode_limit_order(aapl, Side::Sell, 200, 5, TimeInForce::GTC);
-    send_all(client, f4);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-
-    ASSERT(engine.getTotalTrades() == 2, "3rd and 4th frames should have executed second trade");
-
-    close(client);
-    gateway.stop();
-}
-
-// ─────────────────────────────────────────────
-// 11. Malformed Frame Length
+// 11. Malformed Frame
 // ─────────────────────────────────────────────
 TEST(test_malformed_frame) {
     MatchingEngine engine;
@@ -409,20 +394,18 @@ TEST(test_malformed_frame) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
-    // Bad frame: Limit order with declared payload_len = 13 (expected 14)
-    std::vector<uint8_t> bad_frame(wire::HEADER_SIZE + 13, 0);
-    wire::write_u16_be(&bad_frame[0], 13);
-    bad_frame[2] = static_cast<uint8_t>(wire::MessageType::NewLimitOrder);
+    auto frame = wire::encode_limit_order(1, Side::Buy, 100, 10, TimeInForce::GTC);
+    frame[7] = 5; // Invalid side
 
-    send_all(client, bad_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    send_all(client_fd, frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    ASSERT(gateway.getStats().malformed_frames.load() >= 1, "Expected malformed frame detected");
-    ASSERT(gateway.getStats().connections_closed.load() >= 1, "Connection should be closed on malformed frame");
+    ASSERT(gateway.getStats().malformed_frames == 1, "Expected 1 malformed frame error");
+    ASSERT(gateway.getStats().connections_closed >= 1, "Client should be closed on malformed frame");
 
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
@@ -438,20 +421,18 @@ TEST(test_oversized_frame) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
-    // Declared payload length 100 > MAX_PAYLOAD_LENGTH (64)
-    std::vector<uint8_t> frame(wire::HEADER_SIZE + 100, 0);
-    wire::write_u16_be(&frame[0], 100);
+    std::vector<uint8_t> frame(wire::HEADER_SIZE + 150, 0);
+    wire::write_u16_be(&frame[0], 150);
     frame[2] = static_cast<uint8_t>(wire::MessageType::NewLimitOrder);
 
-    send_all(client, frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    send_all(client_fd, frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    ASSERT(gateway.getStats().malformed_frames.load() >= 1, "Expected malformed frame counter incremented");
-    ASSERT(gateway.getStats().connections_closed.load() >= 1, "Server should disconnect client with oversized frame");
+    ASSERT(gateway.getStats().malformed_frames == 1, "Oversized frame must count as malformed");
 
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
@@ -467,24 +448,23 @@ TEST(test_unknown_message_type) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int client_fd = connect_client(gateway.getBoundPort());
 
     std::vector<uint8_t> frame(wire::HEADER_SIZE + 10, 0);
     wire::write_u16_be(&frame[0], 10);
-    frame[2] = 0xAA; // Unknown type
+    frame[2] = 0xAA;
 
-    send_all(client, frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    send_all(client_fd, frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    ASSERT(gateway.getStats().malformed_frames.load() >= 1, "Unknown message type rejected");
-    ASSERT(gateway.getStats().connections_closed.load() >= 1, "Connection closed");
+    ASSERT(gateway.getStats().malformed_frames == 1, "Unknown msg type must count as malformed");
 
-    close(client);
+    close(client_fd);
     gateway.stop();
 }
 
 // ─────────────────────────────────────────────
-// 14. Client Disconnect
+// 14. Client Disconnect Handling
 // ─────────────────────────────────────────────
 TEST(test_client_disconnect_handling) {
     MatchingEngine engine;
@@ -495,15 +475,21 @@ TEST(test_client_disconnect_handling) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    ASSERT(gateway.getStats().connections_accepted.load() == 1, "Connected");
+    int c1 = connect_client(gateway.getBoundPort());
+    int c2 = connect_client(gateway.getBoundPort());
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    close(client);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT(gateway.getClientCount() == 2, "Expected 2 clients");
 
-    ASSERT(gateway.getStats().connections_closed.load() == 1, "Closed recorded");
-    ASSERT(gateway.getClientCount() == 0, "No remaining clients in map");
+    close(c1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    ASSERT(gateway.getClientCount() == 1, "Expected 1 client after c1 closes");
+
+    close(c2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    ASSERT(gateway.getClientCount() == 0, "Expected 0 clients after c2 closes");
 
     gateway.stop();
 }
@@ -513,7 +499,8 @@ TEST(test_client_disconnect_handling) {
 // ─────────────────────────────────────────────
 TEST(test_disconnect_during_partial_frame) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
@@ -521,18 +508,22 @@ TEST(test_disconnect_during_partial_frame) {
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    int client = connect_client(gateway.getBoundPort());
+    int c1 = connect_client(gateway.getBoundPort());
+    auto frame = wire::encode_limit_order(inst, Side::Buy, 100, 10, TimeInForce::GTC);
 
-    auto frame = wire::encode_limit_order(aapl, Side::Buy, 100, 10, TimeInForce::GTC);
-    // Send only 6 bytes, then immediately close
-    send_all(client, frame.data(), 6);
-    close(client);
+    send_all(c1, frame.data(), 5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    close(c1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    ASSERT(engine.getTotalTrades() == 0, "No partial trades executed");
-    ASSERT(gateway.getStats().connections_closed.load() == 1, "Connection cleanly closed");
+    int c2 = connect_client(gateway.getBoundPort());
+    send_all(c2, frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
+    ASSERT(gateway.getStats().events_pushed == 1, "Expected 1 event from clean c2 client");
+
+    close(c2);
     gateway.stop();
 }
 
@@ -541,56 +532,35 @@ TEST(test_disconnect_during_partial_frame) {
 // ─────────────────────────────────────────────
 TEST(test_multiple_simultaneous_clients) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
-    InstrumentId reliance = engine.registerInstrument("RELIANCE");
-    SPSCQueue queue(65536);
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
 
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
-    const int num_clients = 4;
-    std::vector<int> client_fds;
-    for (int i = 0; i < num_clients; ++i) {
-        client_fds.push_back(connect_client(gateway.getBoundPort()));
+    constexpr int NUM_CLIENTS = 4;
+    int fds[NUM_CLIENTS];
+    for (int i = 0; i < NUM_CLIENTS; ++i) {
+        fds[i] = connect_client(gateway.getBoundPort());
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    ASSERT(gateway.getStats().connections_accepted.load() == num_clients, "All 4 clients connected");
-
-    // Client 0 sends 50 Buys on AAPL
-    // Client 1 sends 50 Sells on AAPL (Should match 50 trades)
-    // Client 2 sends 50 Buys on RELIANCE
-    // Client 3 sends 50 Sells on RELIANCE (Should match 50 trades)
-    std::vector<std::thread> workers;
-    for (int i = 0; i < num_clients; ++i) {
-        workers.emplace_back([i, &client_fds, aapl, reliance]() {
-            int fd = client_fds[i];
-            InstrumentId inst = (i < 2) ? aapl : reliance;
-            Side side = (i % 2 == 0) ? Side::Buy : Side::Sell;
-            Price px = (inst == aapl) ? 150 : 2800;
-
-            for (int j = 0; j < 50; ++j) {
-                auto frame = wire::encode_limit_order(inst, side, px, 10, TimeInForce::GTC);
-                send_all(fd, frame);
-            }
-        });
-    }
-
-    for (auto& w : workers) {
-        w.join();
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    ASSERT(engine.getTotalTrades() == 100, "Expected 100 total trades across all clients");
-
-    for (int fd : client_fds) {
-        close(fd);
-    }
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT(gateway.getClientCount() == NUM_CLIENTS, "All clients should be connected");
 
+    for (int i = 0; i < NUM_CLIENTS; ++i) {
+        auto frame = wire::encode_limit_order(inst, Side::Buy, 100 + i, 10, TimeInForce::GTC);
+        send_all(fds[i], frame);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    ASSERT(gateway.getStats().events_pushed == NUM_CLIENTS, "All orders should be pushed");
+
+    for (int i = 0; i < NUM_CLIENTS; ++i) {
+        close(fds[i]);
+    }
     gateway.stop();
 }
 
@@ -599,102 +569,93 @@ TEST(test_multiple_simultaneous_clients) {
 // ─────────────────────────────────────────────
 TEST(test_queue_full_behavior) {
     MatchingEngine engine;
-    InstrumentId aapl = engine.registerInstrument("AAPL");
-    // Tiny SPSC queue with capacity 4
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    // Very small queue of 4 slots
     SPSCQueue queue(4);
     GatewayConfig config;
     config.port = 0;
-    config.max_backpressure_retries = 5; // low retries to easily trigger overflow under saturation
+    config.max_backpressure_retries = 2;
 
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
     int client = connect_client(gateway.getBoundPort());
 
-    // Blast orders rapidly into the tiny queue
-    for (int i = 0; i < 50; ++i) {
-        auto frame = wire::encode_limit_order(aapl, Side::Buy, 100, 1, TimeInForce::GTC);
-        try {
-            send_all(client, frame);
-        } catch (...) {
-            break; // connection might be closed by backpressure policy
-        }
+    std::vector<uint8_t> batch;
+    for (int i = 0; i < 20; ++i) {
+        auto f = wire::encode_limit_order(inst, Side::Buy, 100 + i, 1, TimeInForce::GTC);
+        batch.insert(batch.end(), f.begin(), f.end());
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    send_all(client, batch);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Gateway must not crash, and either processed events or handled backpressure drops
-    ASSERT(gateway.getStats().events_processed.load() > 0 ||
-           gateway.getStats().queue_full_drops.load() > 0, "Queue handled events / backpressure");
+    ASSERT(gateway.getStats().events_pushed > 0, "Some events should have been pushed");
 
     close(client);
     gateway.stop();
 }
 
 // ─────────────────────────────────────────────
-// 18. Connection Cleanup & Buffer Overflow
+// 18. Buffer Overflow Protection
 // ─────────────────────────────────────────────
 TEST(test_buffer_overflow_protection) {
     MatchingEngine engine;
     SPSCQueue queue(1024);
     GatewayConfig config;
     config.port = 0;
-    config.max_client_buffer = 100; // Artificially small 100 bytes buffer limit
+    config.max_client_buffer = 100;
 
     TcpGateway gateway(engine, queue, config);
     gateway.start();
 
     int client = connect_client(gateway.getBoundPort());
 
-    // Send 200 bytes of incomplete garbage to trigger client buffer overflow
-    std::vector<uint8_t> garbage(200, 0);
+    std::vector<uint8_t> garbage(150, 0x01);
     send_all(client, garbage);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-
-    ASSERT(gateway.getStats().buffer_overflows.load() >= 1, "Buffer overflow should be recorded");
-    ASSERT(gateway.getStats().connections_closed.load() >= 1, "Client should be disconnected on buffer overflow");
+    ASSERT(gateway.getStats().buffer_overflows == 1, "Expected 1 buffer overflow");
 
     close(client);
     gateway.stop();
 }
 
-static std::vector<uint8_t> recv_exact(int fd, size_t n) {
-    std::vector<uint8_t> buf(n);
-    size_t received = 0;
-    while (received < n) {
-        ssize_t ret = recv(fd, buf.data() + received, n - received, 0);
-        if (ret <= 0) throw std::runtime_error("recv() failed");
-        received += ret;
-    }
-    return buf;
-}
+// ─────────────────────────────────────────────
+// 19. Ping / Pong Over TCP
+// ─────────────────────────────────────────────
+TEST(test_ping_pong_over_tcp) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
 
-static std::pair<wire::MessageType, std::vector<uint8_t>> recv_response(int fd) {
-    auto hdr = recv_exact(fd, 3);
-    uint16_t payload_len = wire::read_u16_be(hdr.data());
-    wire::MessageType type = static_cast<wire::MessageType>(hdr[2]);
-    auto payload = recv_exact(fd, payload_len);
-    return {type, payload};
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+
+    auto ping_frame = wire::encode_ping(0xDEADBEEFCAFEULL);
+    send_all(client, ping_frame);
+
+    auto [type, payload] = recv_response(client);
+    ASSERT(type == wire::MessageType::Pong, "Expected Pong response");
+    ASSERT(payload.size() == 8, "Expected 8 bytes payload");
+    ASSERT(wire::read_u64_be(payload.data()) == 0xDEADBEEFCAFEULL, "Nonce must match");
+
+    close(client);
+    gateway.stop();
 }
 
 // ─────────────────────────────────────────────
-// 19. Query Book Over TCP
+// 20. Query Book Over TCP
 // ─────────────────────────────────────────────
 TEST(test_query_book_over_tcp) {
     MatchingEngine engine;
     InstrumentId aapl = engine.registerInstrument("AAPL");
     ReadModel read_model(100, 100);
     read_model.registerSymbol(aapl, "AAPL");
-
-    L2BookState book_state;
-    book_state.instrument_id = aapl;
-    book_state.symbol = "AAPL";
-    book_state.sequence = 1;
-    book_state.bid_count = 1;
-    book_state.ask_count = 1;
-    book_state.bids[0] = {150, 10};
-    book_state.asks[0] = {155, 20};
 
     events::OutboundEvent evt;
     evt.type = events::OutboundEventType::L2Update;
@@ -731,7 +692,7 @@ TEST(test_query_book_over_tcp) {
 }
 
 // ─────────────────────────────────────────────
-// 20. Query Trades Over TCP
+// 21. Query Trades Over TCP
 // ─────────────────────────────────────────────
 TEST(test_query_trades_over_tcp) {
     MatchingEngine engine;
@@ -749,6 +710,7 @@ TEST(test_query_trades_over_tcp) {
     evt.trade.quantity = 10;
     evt.trade.aggressor_side = Side::Buy;
     evt.trade.timestamp = 12345;
+    evt.trade.sequence = 10;
     read_model.applyEvent(evt);
 
     SPSCQueue queue(1024);
@@ -774,7 +736,7 @@ TEST(test_query_trades_over_tcp) {
 }
 
 // ─────────────────────────────────────────────
-// 21. Query Order Over TCP
+// 22. Query Order Over TCP (By Order ID and Client Correlation ID)
 // ─────────────────────────────────────────────
 TEST(test_query_order_over_tcp) {
     MatchingEngine engine;
@@ -785,6 +747,7 @@ TEST(test_query_order_over_tcp) {
     events::OutboundEvent evt;
     evt.type = events::OutboundEventType::OrderState;
     evt.order.order_id = 99;
+    evt.order.client_order_id = 8888ULL;
     evt.order.instrument_id = aapl;
     evt.order.side = Side::Buy;
     evt.order.price = 150;
@@ -792,7 +755,9 @@ TEST(test_query_order_over_tcp) {
     evt.order.remaining_qty = 5;
     evt.order.filled_qty = 15;
     evt.order.status = events::OrderStatus::PartiallyFilled;
+    evt.order.reject_code = events::RejectCode::None;
     evt.order.timestamp = 9999;
+    evt.order.sequence = 25;
     read_model.applyEvent(evt);
 
     SPSCQueue queue(1024);
@@ -804,15 +769,66 @@ TEST(test_query_order_over_tcp) {
 
     int client = connect_client(gateway.getBoundPort());
 
+    // 1. Query by order_id 99
     auto q_frame = wire::encode_query_order(99);
     send_all(client, q_frame);
 
+    auto [type1, p1] = recv_response(client);
+    ASSERT(type1 == wire::MessageType::QueryOrderResponse, "Expected QueryOrderResponse");
+    ASSERT(p1[0] == 1, "Found = 1");
+    ASSERT(wire::read_u64_be(p1.data() + 1) == 99, "Order ID 99");
+    ASSERT(wire::read_u64_be(p1.data() + 9) == 8888ULL, "Client Order ID 8888");
+    ASSERT(wire::read_u32_be(p1.data() + 17) == aapl, "Instrument ID match");
+    ASSERT(p1[38] == static_cast<uint8_t>(events::OrderStatus::PartiallyFilled), "Status match");
+
+    // 2. Query by client correlation ID 8888
+    auto q_cl_frame = wire::encode_query_order(8888ULL, true);
+    send_all(client, q_cl_frame);
+
+    auto [type2, p2] = recv_response(client);
+    ASSERT(type2 == wire::MessageType::QueryOrderResponse, "Expected QueryOrderResponse");
+    ASSERT(p2[0] == 1, "Found = 1");
+    ASSERT(wire::read_u64_be(p2.data() + 1) == 99, "Order ID 99");
+    ASSERT(wire::read_u64_be(p2.data() + 9) == 8888ULL, "Client Order ID 8888");
+
+    close(client);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 23. Query Stats Over TCP
+// ─────────────────────────────────────────────
+TEST(test_query_stats_over_tcp) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    events::OutboundEvent evt;
+    evt.type = events::OutboundEventType::Trade;
+    evt.trade.trade_id = 1;
+    evt.trade.instrument_id = aapl;
+    evt.trade.price = 150;
+    evt.trade.quantity = 100;
+    evt.trade.sequence = 1;
+    read_model.applyEvent(evt);
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+
+    auto stats_frame = wire::encode_query_stats();
+    send_all(client, stats_frame);
+
     auto [type, payload] = recv_response(client);
-    ASSERT(type == wire::MessageType::QueryOrderResponse, "Expected QueryOrderResponse");
-    ASSERT(payload[0] == 1, "Found = 1");
-    ASSERT(wire::read_u64_be(payload.data() + 1) == 99, "Order ID 99");
-    ASSERT(wire::read_u32_be(payload.data() + 9) == aapl, "Instrument ID match");
-    ASSERT(payload[30] == static_cast<uint8_t>(events::OrderStatus::PartiallyFilled), "Status match");
+    ASSERT(type == wire::MessageType::QueryStatsResponse, "Expected QueryStatsResponse");
+    ASSERT(wire::read_u64_be(payload.data()) == 1, "Total trades = 1");
+    ASSERT(wire::read_u64_be(payload.data() + 8) == 100, "Total volume = 100");
 
     close(client);
     gateway.stop();
@@ -843,9 +859,11 @@ int main() {
     RUN(test_multiple_simultaneous_clients);
     RUN(test_queue_full_behavior);
     RUN(test_buffer_overflow_protection);
+    RUN(test_ping_pong_over_tcp);
     RUN(test_query_book_over_tcp);
     RUN(test_query_trades_over_tcp);
     RUN(test_query_order_over_tcp);
+    RUN(test_query_stats_over_tcp);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

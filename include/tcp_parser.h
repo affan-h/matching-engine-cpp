@@ -20,7 +20,7 @@ enum class ParseStatus {
 
 enum class ParseError {
     None = 0,
-    PayloadTooLarge,        // payload_len > MAX_PAYLOAD_LENGTH (64)
+    PayloadTooLarge,        // payload_len > MAX_PAYLOAD_LENGTH (128)
     InvalidPayloadLength,   // payload_len does not match expected size for msg_type
     UnknownMessageType,     // msg_type is not recognized
     InvalidSide,            // side is not 0 (Buy) or 1 (Sell)
@@ -33,7 +33,7 @@ enum class ParseError {
 inline const char* parseErrorToString(ParseError error) {
     switch (error) {
         case ParseError::None:                 return "None";
-        case ParseError::PayloadTooLarge:      return "Payload too large (> 64 bytes)";
+        case ParseError::PayloadTooLarge:      return "Payload too large (> 128 bytes)";
         case ParseError::InvalidPayloadLength: return "Invalid payload length for message type";
         case ParseError::UnknownMessageType:   return "Unknown message type";
         case ParseError::InvalidSide:          return "Invalid side (must be 0 for Buy or 1 for Sell)";
@@ -50,9 +50,15 @@ inline const char* parseErrorToString(ParseError error) {
 // ─────────────────────────────────────────────
 
 enum class FrameCategory {
+    Session, // Session management (Ping / Pong / Heartbeat)
     Command, // Order commands going to matching engine
     Query,   // Read-only queries answered by ReadModel
     Unknown
+};
+
+struct SessionFrame {
+    wire::MessageType type{wire::MessageType::Ping};
+    uint64_t nonce{0};
 };
 
 struct QueryFrame {
@@ -60,10 +66,12 @@ struct QueryFrame {
     InstrumentId instrument_id{0};
     uint32_t limit{0};
     OrderId order_id{0};
+    bool query_by_client_id{false};
 };
 
 struct ParsedFrame {
     FrameCategory category{FrameCategory::Unknown};
+    SessionFrame session{};
     OrderEvent command{};
     QueryFrame query{};
 };
@@ -105,7 +113,7 @@ public:
         append(data.data(), data.size());
     }
 
-    // Parse the next frame (Command or Query)
+    // Parse the next frame (Session, Command, or Query)
     ParseStatus parseNextFrame(ParsedFrame& out_frame, ParseError& out_error) {
         out_error = ParseError::None;
         out_frame = ParsedFrame{};
@@ -127,38 +135,58 @@ public:
         }
 
         // Validation 2: Message Type and Expected Payload Length
-        size_t expected_len = 0;
+        bool is_session = false;
         bool is_command = false;
         bool is_query = false;
+        bool valid_length = false;
 
         switch (msg_type_raw) {
+            case static_cast<uint8_t>(wire::MessageType::Heartbeat):
+                valid_length = (payload_len == 0);
+                is_session = true;
+                break;
+            case static_cast<uint8_t>(wire::MessageType::Ping):
+            case static_cast<uint8_t>(wire::MessageType::Pong):
+                valid_length = (payload_len == wire::PING_PAYLOAD_SIZE);
+                is_session = true;
+                break;
+
             case static_cast<uint8_t>(wire::MessageType::NewLimitOrder):
-                expected_len = wire::LIMIT_ORDER_PAYLOAD_SIZE;
+                valid_length = (payload_len == wire::LIMIT_ORDER_LEGACY_PAYLOAD_SIZE ||
+                                payload_len == wire::LIMIT_ORDER_PAYLOAD_SIZE);
                 is_command = true;
                 break;
             case static_cast<uint8_t>(wire::MessageType::NewMarketOrder):
-                expected_len = wire::MARKET_ORDER_PAYLOAD_SIZE;
+                valid_length = (payload_len == wire::MARKET_ORDER_LEGACY_PAYLOAD_SIZE ||
+                                payload_len == wire::MARKET_ORDER_PAYLOAD_SIZE);
                 is_command = true;
                 break;
             case static_cast<uint8_t>(wire::MessageType::CancelOrder):
-                expected_len = wire::CANCEL_ORDER_PAYLOAD_SIZE;
+                valid_length = (payload_len == wire::CANCEL_ORDER_LEGACY_PAYLOAD_SIZE ||
+                                payload_len == wire::CANCEL_ORDER_PAYLOAD_SIZE);
                 is_command = true;
                 break;
             case static_cast<uint8_t>(wire::MessageType::ModifyOrder):
-                expected_len = wire::MODIFY_ORDER_PAYLOAD_SIZE;
+                valid_length = (payload_len == wire::MODIFY_ORDER_LEGACY_PAYLOAD_SIZE ||
+                                payload_len == wire::MODIFY_ORDER_PAYLOAD_SIZE);
                 is_command = true;
                 break;
 
             case static_cast<uint8_t>(wire::MessageType::QueryBook):
-                expected_len = wire::QUERY_BOOK_PAYLOAD_SIZE;
+                valid_length = (payload_len == wire::QUERY_BOOK_PAYLOAD_SIZE);
                 is_query = true;
                 break;
             case static_cast<uint8_t>(wire::MessageType::QueryTrades):
-                expected_len = wire::QUERY_TRADES_PAYLOAD_SIZE;
+                valid_length = (payload_len == wire::QUERY_TRADES_PAYLOAD_SIZE);
                 is_query = true;
                 break;
             case static_cast<uint8_t>(wire::MessageType::QueryOrder):
-                expected_len = wire::QUERY_ORDER_PAYLOAD_SIZE;
+                valid_length = (payload_len == wire::QUERY_ORDER_PAYLOAD_SIZE ||
+                                payload_len == wire::QUERY_ORDER_EXT_PAYLOAD_SIZE);
+                is_query = true;
+                break;
+            case static_cast<uint8_t>(wire::MessageType::QueryStats):
+                valid_length = (payload_len == wire::QUERY_STATS_PAYLOAD_SIZE);
                 is_query = true;
                 break;
 
@@ -167,7 +195,7 @@ public:
                 return ParseStatus::Error;
         }
 
-        if (payload_len != expected_len) {
+        if (!valid_length) {
             out_error = ParseError::InvalidPayloadLength;
             return ParseStatus::Error;
         }
@@ -181,17 +209,29 @@ public:
         // Extract payload
         const uint8_t* payload = &buffer[read_offset + wire::HEADER_SIZE];
 
-        if (is_command) {
+        if (is_session) {
+            out_frame.category = FrameCategory::Session;
+            out_frame.session.type = static_cast<wire::MessageType>(msg_type_raw);
+            if (payload_len >= 8) {
+                out_frame.session.nonce = wire::read_u64_be(payload);
+            }
+        } else if (is_command) {
             out_frame.category = FrameCategory::Command;
             const wire::MessageType msg_type = static_cast<wire::MessageType>(msg_type_raw);
 
             switch (msg_type) {
                 case wire::MessageType::NewLimitOrder: {
-                    uint32_t inst_id = wire::read_u32_be(payload + 0);
-                    uint8_t  side_raw = payload[4];
-                    uint32_t price_raw = wire::read_u32_be(payload + 5);
-                    uint32_t qty_raw = wire::read_u32_be(payload + 9);
-                    uint8_t  tif_raw = payload[13];
+                    uint64_t cl_ord_id = 0;
+                    size_t off = 0;
+                    if (payload_len == wire::LIMIT_ORDER_PAYLOAD_SIZE) {
+                        cl_ord_id = wire::read_u64_be(payload);
+                        off = 8;
+                    }
+                    uint32_t inst_id = wire::read_u32_be(payload + off);
+                    uint8_t  side_raw = payload[off + 4];
+                    uint32_t price_raw = wire::read_u32_be(payload + off + 5);
+                    uint32_t qty_raw = wire::read_u32_be(payload + off + 9);
+                    uint8_t  tif_raw = payload[off + 13];
 
                     if (side_raw > 1) {
                         out_error = ParseError::InvalidSide;
@@ -213,6 +253,7 @@ public:
                     out_frame.command.type = EventType::LimitOrder;
                     out_frame.command.instrument = inst_id;
                     out_frame.command.id = 0;
+                    out_frame.command.client_order_id = cl_ord_id;
                     out_frame.command.side = (side_raw == 0) ? Side::Buy : Side::Sell;
                     out_frame.command.price = static_cast<Price>(price_raw);
                     out_frame.command.qty = static_cast<Quantity>(qty_raw);
@@ -221,9 +262,15 @@ public:
                 }
 
                 case wire::MessageType::NewMarketOrder: {
-                    uint32_t inst_id = wire::read_u32_be(payload + 0);
-                    uint8_t  side_raw = payload[4];
-                    uint32_t qty_raw = wire::read_u32_be(payload + 5);
+                    uint64_t cl_ord_id = 0;
+                    size_t off = 0;
+                    if (payload_len == wire::MARKET_ORDER_PAYLOAD_SIZE) {
+                        cl_ord_id = wire::read_u64_be(payload);
+                        off = 8;
+                    }
+                    uint32_t inst_id = wire::read_u32_be(payload + off);
+                    uint8_t  side_raw = payload[off + 4];
+                    uint32_t qty_raw = wire::read_u32_be(payload + off + 5);
 
                     if (side_raw > 1) {
                         out_error = ParseError::InvalidSide;
@@ -237,6 +284,7 @@ public:
                     out_frame.command.type = EventType::MarketOrder;
                     out_frame.command.instrument = inst_id;
                     out_frame.command.id = 0;
+                    out_frame.command.client_order_id = cl_ord_id;
                     out_frame.command.side = (side_raw == 0) ? Side::Buy : Side::Sell;
                     out_frame.command.price = 0;
                     out_frame.command.qty = static_cast<Quantity>(qty_raw);
@@ -245,8 +293,14 @@ public:
                 }
 
                 case wire::MessageType::CancelOrder: {
-                    uint32_t inst_id = wire::read_u32_be(payload + 0);
-                    uint64_t order_id = wire::read_u64_be(payload + 4);
+                    uint64_t cl_ord_id = 0;
+                    size_t off = 0;
+                    if (payload_len == wire::CANCEL_ORDER_PAYLOAD_SIZE) {
+                        cl_ord_id = wire::read_u64_be(payload);
+                        off = 8;
+                    }
+                    uint32_t inst_id = wire::read_u32_be(payload + off);
+                    uint64_t order_id = wire::read_u64_be(payload + off + 4);
 
                     if (order_id < wire::MIN_ORDER_ID) {
                         out_error = ParseError::InvalidOrderId;
@@ -256,6 +310,7 @@ public:
                     out_frame.command.type = EventType::CancelOrder;
                     out_frame.command.instrument = inst_id;
                     out_frame.command.id = order_id;
+                    out_frame.command.client_order_id = cl_ord_id;
                     out_frame.command.side = Side::Buy;
                     out_frame.command.price = 0;
                     out_frame.command.qty = 0;
@@ -264,10 +319,16 @@ public:
                 }
 
                 case wire::MessageType::ModifyOrder: {
-                    uint32_t inst_id = wire::read_u32_be(payload + 0);
-                    uint64_t order_id = wire::read_u64_be(payload + 4);
-                    uint32_t new_price_raw = wire::read_u32_be(payload + 12);
-                    uint32_t new_qty_raw = wire::read_u32_be(payload + 16);
+                    uint64_t cl_ord_id = 0;
+                    size_t off = 0;
+                    if (payload_len == wire::MODIFY_ORDER_PAYLOAD_SIZE) {
+                        cl_ord_id = wire::read_u64_be(payload);
+                        off = 8;
+                    }
+                    uint32_t inst_id = wire::read_u32_be(payload + off);
+                    uint64_t order_id = wire::read_u64_be(payload + off + 4);
+                    uint32_t new_price_raw = wire::read_u32_be(payload + off + 12);
+                    uint32_t new_qty_raw = wire::read_u32_be(payload + off + 16);
 
                     if (order_id < wire::MIN_ORDER_ID) {
                         out_error = ParseError::InvalidOrderId;
@@ -285,6 +346,7 @@ public:
                     out_frame.command.type = EventType::ModifyOrder;
                     out_frame.command.instrument = inst_id;
                     out_frame.command.id = order_id;
+                    out_frame.command.client_order_id = cl_ord_id;
                     out_frame.command.side = Side::Buy;
                     out_frame.command.price = static_cast<Price>(new_price_raw);
                     out_frame.command.qty = static_cast<Quantity>(new_qty_raw);
@@ -310,11 +372,21 @@ public:
                     break;
                 }
                 case wire::MessageType::QueryOrder: {
-                    out_frame.query.order_id = wire::read_u64_be(payload + 0);
+                    if (payload_len == wire::QUERY_ORDER_EXT_PAYLOAD_SIZE) {
+                        out_frame.query.query_by_client_id = (payload[0] == 0x01);
+                        out_frame.query.order_id = wire::read_u64_be(payload + 1);
+                    } else {
+                        out_frame.query.query_by_client_id = false;
+                        out_frame.query.order_id = wire::read_u64_be(payload + 0);
+                    }
                     if (out_frame.query.order_id < wire::MIN_ORDER_ID) {
                         out_error = ParseError::InvalidOrderId;
                         return ParseStatus::Error;
                     }
+                    break;
+                }
+                case wire::MessageType::QueryStats: {
+                    // No extra payload fields needed
                     break;
                 }
                 default:

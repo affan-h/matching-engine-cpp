@@ -43,6 +43,7 @@ class MockGatewayTcpClient(GatewayTcpClient):
         self.mock_orders: Dict[int, Dict[str, Any]] = {
             42: {
                 "order_id": 42,
+                "client_order_id": 9001,
                 "symbol": "AAPL",
                 "instrument_id": 0,
                 "side": "buy",
@@ -51,8 +52,21 @@ class MockGatewayTcpClient(GatewayTcpClient):
                 "remaining_quantity": 0,
                 "filled_quantity": 10,
                 "status": "FILLED",
+                "reject_code": "NONE",
                 "timestamp": 123456789,
+                "sequence": 1,
             }
+        }
+        self.mock_stats: Dict[str, Any] = {
+            "total_trades": 1,
+            "total_volume": 10,
+            "total_orders_accepted": 2,
+            "total_orders_filled": 2,
+            "total_orders_cancelled": 0,
+            "total_orders_rejected": 0,
+            "last_sequence": 5,
+            "tracked_orders_count": 1,
+            "registered_symbols_count": 4,
         }
 
     def connect(self):
@@ -81,10 +95,20 @@ class MockGatewayTcpClient(GatewayTcpClient):
             raise GatewayUnavailableError("Mock gateway query failure")
         return self.mock_trades.get(symbol, [])[:limit]
 
-    def query_order(self, order_id: int) -> Optional[Dict[str, Any]]:
+    def query_order(self, order_id: int, by_client_id: bool = False) -> Optional[Dict[str, Any]]:
         if self.should_fail:
             raise GatewayUnavailableError("Mock gateway query failure")
+        if by_client_id:
+            for o in self.mock_orders.values():
+                if o.get("client_order_id") == order_id:
+                    return o
+            return None
         return self.mock_orders.get(order_id)
+
+    def query_stats(self) -> Dict[str, Any]:
+        if self.should_fail:
+            raise GatewayUnavailableError("Mock gateway query failure")
+        return self.mock_stats
 
     def check_health(self) -> bool:
         return not self.should_fail
@@ -116,20 +140,22 @@ def api_test_client():
 # ─────────────────────────────────────────────
 
 def test_valid_limit_order(api_test_client, mock_client):
-    """Test 1: Valid Limit Order submission."""
+    """Test 1: Valid Limit Order submission with client correlation ID."""
     response = api_test_client.post("/orders", json={
         "symbol": "AAPL",
         "side": "buy",
         "order_type": "limit",
         "price": 150,
         "quantity": 10,
-        "time_in_force": "GTC"
+        "time_in_force": "GTC",
+        "client_order_id": 9001
     })
     assert response.status_code == 202
     data = response.json()
     assert data["status"] == "ACCEPTED"
     assert data["symbol"] == "AAPL"
     assert data["instrument_id"] == 0
+    assert data["client_order_id"] == 9001
     assert data["side"] == "buy"
     assert data["order_type"] == "limit"
     assert data["price"] == 150
@@ -144,13 +170,15 @@ def test_valid_market_order(api_test_client, mock_client):
         "symbol": "RELIANCE",
         "side": "sell",
         "order_type": "market",
-        "quantity": 25
+        "quantity": 25,
+        "client_order_id": 9002
     })
     assert response.status_code == 202
     data = response.json()
     assert data["status"] == "ACCEPTED"
     assert data["symbol"] == "RELIANCE"
     assert data["instrument_id"] == 1
+    assert data["client_order_id"] == 9002
     assert data["side"] == "sell"
     assert data["order_type"] == "market"
     assert data["time_in_force"] == "IOC"
@@ -243,12 +271,13 @@ def test_invalid_price(api_test_client, mock_client):
 
 def test_cancel_order(api_test_client, mock_client):
     """Test 9: Cancel order submission."""
-    response = api_test_client.delete("/orders/42?symbol=AAPL")
+    response = api_test_client.delete("/orders/42?symbol=AAPL&client_order_id=9003")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ACCEPTED"
     assert data["symbol"] == "AAPL"
     assert data["order_id"] == 42
+    assert data["client_order_id"] == 9003
     assert len(mock_client.submitted_events) == 1
 
 
@@ -257,12 +286,14 @@ def test_modify_order(api_test_client, mock_client):
     response = api_test_client.patch("/orders/42", json={
         "symbol": "AAPL",
         "new_price": 105,
-        "new_quantity": 8
+        "new_quantity": 8,
+        "client_order_id": 9004
     })
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ACCEPTED"
     assert data["order_id"] == 42
+    assert data["client_order_id"] == 9004
     assert data["new_price"] == 105
     assert data["new_quantity"] == 8
     assert len(mock_client.submitted_events) == 1
@@ -313,21 +344,43 @@ def test_trades_endpoint(api_test_client, mock_client):
 
 
 def test_orders_endpoint(api_test_client, mock_client):
-    """Test 14: Order query endpoint for existing and nonexistent orders."""
+    """Test 14: Order query endpoint by order_id and by client correlation ID."""
+    # 1. By internal Order ID 42
     r_ok = api_test_client.get("/orders/42")
     assert r_ok.status_code == 200
     data = r_ok.json()
     assert data["order_id"] == 42
+    assert data["client_order_id"] == 9001
     assert data["symbol"] == "AAPL"
     assert data["status"] == "FILLED"
     assert data["filled_quantity"] == 10
 
+    # 2. By Client Correlation ID 9001
+    r_cl = api_test_client.get("/orders/9001?by_client_id=true")
+    assert r_cl.status_code == 200
+    assert r_cl.json()["order_id"] == 42
+
+    # 3. Not found
     r_err = api_test_client.get("/orders/9999")
     assert r_err.status_code == 404
 
 
+def test_metrics_endpoint(api_test_client, mock_client):
+    """Test 15: Metrics / Stats endpoint returns platform telemetry."""
+    r_metrics = api_test_client.get("/metrics")
+    assert r_metrics.status_code == 200
+    data = r_metrics.json()
+    assert data["total_trades"] == 1
+    assert data["total_volume"] == 10
+    assert data["gateway_connected"] is True
+
+    r_stats = api_test_client.get("/stats")
+    assert r_stats.status_code == 200
+    assert r_stats.json()["total_trades"] == 1
+
+
 def test_health_endpoint(api_test_client, mock_client):
-    """Test 15: Health endpoint when gateway is healthy vs degraded."""
+    """Test 16: Health endpoint when gateway is healthy vs degraded."""
     r_healthy = api_test_client.get("/health")
     assert r_healthy.status_code == 200
     assert r_healthy.json()["status"] == "healthy"
@@ -335,7 +388,7 @@ def test_health_endpoint(api_test_client, mock_client):
 
 
 def test_health_endpoint_degraded(api_test_client, failing_mock_client):
-    """Test 16: Health endpoint degraded."""
+    """Test 17: Health endpoint degraded."""
     r_degraded = api_test_client.get("/health")
     assert r_degraded.status_code == 503
     assert r_degraded.json()["status"] == "degraded"
@@ -343,20 +396,20 @@ def test_health_endpoint_degraded(api_test_client, failing_mock_client):
 
 
 def test_cancel_order_invalid_symbol(api_test_client, mock_client):
-    """Test 17: Cancel with invalid symbol returns 400."""
+    """Test 18: Cancel with invalid symbol returns 400."""
     response = api_test_client.delete("/orders/1?symbol=INVALID_SYMBOL")
     assert response.status_code == 400
     assert "Unknown symbol" in response.json()["detail"]
 
 
 def test_cancel_order_invalid_order_id(api_test_client, mock_client):
-    """Test 18: Cancel with order_id=0 returns 422."""
+    """Test 19: Cancel with order_id=0 returns 422."""
     response = api_test_client.delete("/orders/0?symbol=AAPL")
     assert response.status_code == 422
 
 
 def test_modify_order_invalid_inputs(api_test_client, mock_client):
-    """Test 19: Modify with invalid order_id, price, qty, or symbol."""
+    """Test 20: Modify with invalid order_id, price, qty, or symbol."""
     r1 = api_test_client.patch("/orders/0", json={
         "symbol": "AAPL", "new_price": 100, "new_quantity": 10
     })
@@ -379,7 +432,7 @@ def test_modify_order_invalid_inputs(api_test_client, mock_client):
 
 
 def test_market_order_with_price_rejected(api_test_client, mock_client):
-    """Test 20: Market order specifying non-zero price is rejected."""
+    """Test 21: Market order specifying non-zero price is rejected."""
     response = api_test_client.post("/orders", json={
         "symbol": "AAPL",
         "side": "buy",
@@ -418,13 +471,13 @@ def wait_for_port(port: int, host: str = "127.0.0.1", timeout: float = 3.0) -> b
 
 def test_real_gateway_end_to_end():
     """
-    Test 21: Full End-to-End Command and Query Plane:
-      1. POST /orders (Limit Buy) -> MatchingEngine -> SPSC Outbound -> Projector -> ReadModel
+    Test 22: Full End-to-End Command and Query Plane with Correlation & Telemetry:
+      1. POST /orders (Limit Buy with client_order_id=7001)
       2. GET /book/AAPL -> ReadModel L2 snapshot
-      3. GET /orders/1 -> ReadModel order state
-      4. POST /orders (Matching Limit Sell) -> Trade executed
+      3. GET /orders/7001?by_client_id=true -> ReadModel order state
+      4. POST /orders (Matching Limit Sell with client_order_id=7002)
       5. GET /trades/AAPL -> ReadModel trade history
-      6. GET /orders/1 and GET /orders/2 -> ReadModel FILLED states
+      6. GET /metrics -> Platform telemetry
     """
     test_port = get_free_port()
     proc = subprocess.Popen(
@@ -444,17 +497,19 @@ def test_real_gateway_end_to_end():
         assert health_resp.status_code == 200
         assert health_resp.json()["status"] == "healthy"
 
-        # 2. Submit Limit Buy AAPL 150 @ 10
+        # 2. Submit Limit Buy AAPL 150 @ 10 with correlation ID 7001
         buy_resp = http_client.post("/orders", json={
             "symbol": "AAPL",
             "side": "buy",
             "order_type": "limit",
             "price": 150,
             "quantity": 10,
-            "time_in_force": "GTC"
+            "time_in_force": "GTC",
+            "client_order_id": 7001
         })
         assert buy_resp.status_code == 202
         assert buy_resp.json()["status"] == "ACCEPTED"
+        assert buy_resp.json()["client_order_id"] == 7001
 
         time.sleep(0.1)
 
@@ -467,23 +522,25 @@ def test_real_gateway_end_to_end():
         assert book_data["bids"][0]["price"] == 150
         assert book_data["bids"][0]["quantity"] == 10
 
-        # 4. Query Order 1 Status (Resting / New)
-        order1_resp = http_client.get("/orders/1")
+        # 4. Query Order Status by Correlation ID 7001
+        order1_resp = http_client.get("/orders/7001?by_client_id=true")
         assert order1_resp.status_code == 200
         o1_data = order1_resp.json()
         assert o1_data["order_id"] == 1
+        assert o1_data["client_order_id"] == 7001
         assert o1_data["symbol"] == "AAPL"
         assert o1_data["status"] == "NEW"
         assert o1_data["remaining_quantity"] == 10
 
-        # 5. Submit matching Limit Sell AAPL 150 @ 10
+        # 5. Submit matching Limit Sell AAPL 150 @ 10 with correlation ID 7002
         sell_resp = http_client.post("/orders", json={
             "symbol": "AAPL",
             "side": "sell",
             "order_type": "limit",
             "price": 150,
             "quantity": 10,
-            "time_in_force": "GTC"
+            "time_in_force": "GTC",
+            "client_order_id": 7002
         })
         assert sell_resp.status_code == 202
 
@@ -500,16 +557,25 @@ def test_real_gateway_end_to_end():
         assert latest_trade["buy_order_id"] == 1
         assert latest_trade["sell_order_id"] == 2
 
-        # 7. Query Order 1 & Order 2 Status (Now FILLED)
-        o1_filled = http_client.get("/orders/1").json()
+        # 7. Query Orders by Correlation ID -> Status is now FILLED
+        o1_filled = http_client.get("/orders/7001?by_client_id=true").json()
         assert o1_filled["status"] == "FILLED"
         assert o1_filled["remaining_quantity"] == 0
         assert o1_filled["filled_quantity"] == 10
 
-        o2_filled = http_client.get("/orders/2").json()
+        o2_filled = http_client.get("/orders/7002?by_client_id=true").json()
         assert o2_filled["status"] == "FILLED"
         assert o2_filled["remaining_quantity"] == 0
         assert o2_filled["filled_quantity"] == 10
+
+        # 8. Query Telemetry Metrics
+        metrics_resp = http_client.get("/metrics")
+        assert metrics_resp.status_code == 200
+        m_data = metrics_resp.json()
+        assert m_data["total_trades"] >= 1
+        assert m_data["total_volume"] >= 10
+        assert m_data["last_sequence"] >= 3
+        assert m_data["gateway_connected"] is True
 
     finally:
         app.dependency_overrides.clear()

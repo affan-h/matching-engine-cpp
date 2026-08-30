@@ -30,6 +30,7 @@ struct GatewayStats {
     std::atomic<uint64_t> events_pushed{0};
     std::atomic<uint64_t> events_processed{0};
     std::atomic<uint64_t> queries_processed{0};
+    std::atomic<uint64_t> session_frames_processed{0};
     std::atomic<uint64_t> malformed_frames{0};
     std::atomic<uint64_t> buffer_overflows{0};
     std::atomic<uint64_t> queue_full_drops{0};
@@ -69,6 +70,7 @@ private:
     void runGateway();
     void runConsumer();
     void closeClient(int fd);
+    void handleSession(int fd, const SessionFrame& session);
     void handleQuery(int fd, const QueryFrame& query);
 
 public:

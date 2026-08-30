@@ -164,6 +164,14 @@ void TcpGateway::closeClient(int fd) {
     }
 }
 
+void TcpGateway::handleSession(int fd, const SessionFrame& session) {
+    if (session.type == wire::MessageType::Ping) {
+        auto resp = wire::encode_pong(session.nonce);
+        send(fd, resp.data(), resp.size(), 0);
+    }
+    stats.session_frames_processed++;
+}
+
 void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
     if (!read_model) return;
 
@@ -184,8 +192,20 @@ void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
         }
         case wire::MessageType::QueryOrder: {
             OrderRecord order;
-            bool found = read_model->getOrder(query.order_id, order);
+            bool found = false;
+            if (query.query_by_client_id) {
+                found = read_model->getOrderByClientId(query.order_id, order);
+            } else {
+                found = read_model->getOrder(query.order_id, order);
+            }
             auto resp = wire::encode_query_order_response(found, order);
+            send(fd, resp.data(), resp.size(), 0);
+            break;
+        }
+        case wire::MessageType::QueryStats: {
+            EngineMetrics metrics;
+            read_model->getMetrics(metrics);
+            auto resp = wire::encode_query_stats_response(metrics);
             send(fd, resp.data(), resp.size(), 0);
             break;
         }
@@ -281,7 +301,10 @@ void TcpGateway::runGateway() {
                             ParseStatus status = client.parser.parseNextFrame(frame, err);
 
                             if (status == ParseStatus::Ok) {
-                                if (frame.category == FrameCategory::Command) {
+                                if (frame.category == FrameCategory::Session) {
+                                    handleSession(fd, frame.session);
+                                } else if (frame.category == FrameCategory::Command) {
+                                    frame.command.client_fd = fd;
                                     // Push to SPSC Queue with bounded backpressure retries
                                     bool pushed = false;
                                     for (int retry = 0; retry < config.max_backpressure_retries; ++retry) {
@@ -345,16 +368,16 @@ void TcpGateway::runConsumer() {
         if (queue.pop(event)) {
             switch (event.type) {
                 case EventType::LimitOrder:
-                    engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif);
+                    engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif, event.client_order_id);
                     break;
                 case EventType::MarketOrder:
-                    engine.addMarketOrder(event.instrument, event.side, event.qty);
+                    engine.addMarketOrder(event.instrument, event.side, event.qty, event.client_order_id);
                     break;
                 case EventType::CancelOrder:
-                    engine.cancelOrder(event.instrument, event.id);
+                    engine.cancelOrder(event.instrument, event.id, event.client_order_id);
                     break;
                 case EventType::ModifyOrder:
-                    engine.modifyOrder(event.instrument, event.id, event.price, event.qty);
+                    engine.modifyOrder(event.instrument, event.id, event.price, event.qty, event.client_order_id);
                     break;
             }
             stats.events_processed++;
@@ -367,16 +390,16 @@ void TcpGateway::runConsumer() {
     while (queue.pop(event)) {
         switch (event.type) {
             case EventType::LimitOrder:
-                engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif);
+                engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif, event.client_order_id);
                 break;
             case EventType::MarketOrder:
-                engine.addMarketOrder(event.instrument, event.side, event.qty);
+                engine.addMarketOrder(event.instrument, event.side, event.qty, event.client_order_id);
                 break;
             case EventType::CancelOrder:
-                engine.cancelOrder(event.instrument, event.id);
+                engine.cancelOrder(event.instrument, event.id, event.client_order_id);
                 break;
             case EventType::ModifyOrder:
-                engine.modifyOrder(event.instrument, event.id, event.price, event.qty);
+                engine.modifyOrder(event.instrument, event.id, event.price, event.qty, event.client_order_id);
                 break;
         }
         stats.events_processed++;

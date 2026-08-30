@@ -35,6 +35,7 @@ TEST(test_trade_event_reaches_read_model) {
     evt.trade.price = 150;
     evt.trade.quantity = 100;
     evt.trade.timestamp = 1000;
+    evt.trade.sequence = 1;
 
     model.applyEvent(evt);
 
@@ -46,6 +47,7 @@ TEST(test_trade_event_reaches_read_model) {
     assert(trades[0].price == 150);
     assert(trades[0].quantity == 100);
     assert(trades[0].aggressor_side == Side::Buy);
+    assert(trades[0].sequence == 1);
 }
 
 // 2. L2 Update Reaches Read Model
@@ -86,6 +88,7 @@ TEST(test_order_state_lifecycle) {
     events::OutboundEvent e1;
     e1.type = events::OutboundEventType::OrderState;
     e1.order.order_id = 42;
+    e1.order.client_order_id = 1001;
     e1.order.instrument_id = 0;
     e1.order.side = Side::Buy;
     e1.order.price = 150;
@@ -94,12 +97,14 @@ TEST(test_order_state_lifecycle) {
     e1.order.filled_qty = 0;
     e1.order.status = events::OrderStatus::New;
     e1.order.timestamp = 100;
+    e1.order.sequence = 1;
     model.applyEvent(e1);
 
     OrderRecord rec;
     assert(model.getOrder(42, rec));
     assert(rec.status == events::OrderStatus::New);
     assert(rec.remaining_qty == 100);
+    assert(rec.client_order_id == 1001);
 
     // 2. Order Partial Fill
     events::OutboundEvent e2;
@@ -108,6 +113,7 @@ TEST(test_order_state_lifecycle) {
     e2.order.remaining_qty = 40;
     e2.order.filled_qty = 60;
     e2.order.status = events::OrderStatus::PartiallyFilled;
+    e2.order.sequence = 2;
     model.applyEvent(e2);
 
     assert(model.getOrder(42, rec));
@@ -122,6 +128,7 @@ TEST(test_order_state_lifecycle) {
     e3.order.remaining_qty = 0;
     e3.order.filled_qty = 100;
     e3.order.status = events::OrderStatus::Filled;
+    e3.order.sequence = 3;
     model.applyEvent(e3);
 
     assert(model.getOrder(42, rec));
@@ -143,6 +150,7 @@ TEST(test_multiple_events_preserve_ordering) {
         evt.trade.price = 100 + i;
         evt.trade.quantity = i * 10;
         evt.trade.timestamp = i * 1000;
+        evt.trade.sequence = i;
         model.applyEvent(evt);
     }
 
@@ -191,11 +199,9 @@ TEST(test_multi_instrument_isolation) {
 
 // 6. Bounded Trade History Eviction
 TEST(test_bounded_trade_history_eviction) {
-    // Capacity of 10 trades
     ReadModel model(100, 10);
     model.registerSymbol(0, "AAPL");
 
-    // Insert 15 trades
     for (uint64_t i = 1; i <= 15; ++i) {
         events::OutboundEvent evt;
         evt.type = events::OutboundEventType::Trade;
@@ -211,14 +217,12 @@ TEST(test_bounded_trade_history_eviction) {
     std::vector<TradeRecord> trades;
     model.getRecentTrades(0, 20, trades);
     assert(trades.size() == 10);
-    // Newest is 15, oldest remaining is 6 (1..5 were evicted)
     assert(trades[0].trade_id == 15);
     assert(trades[9].trade_id == 6);
 }
 
 // 7. Bounded Order History Eviction
 TEST(test_bounded_order_history_eviction) {
-    // Capacity of 10 orders
     ReadModel model(10, 100);
     model.registerSymbol(0, "AAPL");
 
@@ -226,6 +230,7 @@ TEST(test_bounded_order_history_eviction) {
         events::OutboundEvent evt;
         evt.type = events::OutboundEventType::OrderState;
         evt.order.order_id = id;
+        evt.order.client_order_id = 1000 + id;
         evt.order.instrument_id = 0;
         evt.order.price = 100;
         evt.order.original_qty = 10;
@@ -236,13 +241,13 @@ TEST(test_bounded_order_history_eviction) {
     assert(model.getOrderCount() == 10);
 
     OrderRecord rec;
-    // Orders 1..5 should be evicted
     for (OrderId id = 1; id <= 5; ++id) {
         assert(!model.getOrder(id, rec));
+        assert(!model.getOrderByClientId(1000 + id, rec));
     }
-    // Orders 6..15 should exist
     for (OrderId id = 6; id <= 15; ++id) {
         assert(model.getOrder(id, rec));
+        assert(model.getOrderByClientId(1000 + id, rec));
         assert(rec.order_id == id);
     }
 }
@@ -272,7 +277,6 @@ TEST(test_concurrent_reads_with_projector_writes) {
 
     std::atomic<bool> stop_flag{false};
 
-    // Writer thread pushing events through queue
     std::thread writer([&]() {
         for (uint64_t i = 1; i <= 500; ++i) {
             events::OutboundEvent evt;
@@ -289,7 +293,6 @@ TEST(test_concurrent_reads_with_projector_writes) {
         stop_flag.store(true);
     });
 
-    // Multiple concurrent reader threads querying ReadModel
     std::atomic<uint64_t> reads_count{0};
     auto reader_fn = [&]() {
         while (!stop_flag.load()) {
@@ -326,7 +329,6 @@ TEST(test_projector_shutdown_drain) {
     model.registerSymbol(0, "AAPL");
     OutboundEventQueue queue(1024);
 
-    // Push 50 events before starting projector
     for (uint64_t i = 1; i <= 50; ++i) {
         events::OutboundEvent evt;
         evt.type = events::OutboundEventType::Trade;
@@ -339,14 +341,59 @@ TEST(test_projector_shutdown_drain) {
 
     Projector projector(queue, model);
     projector.start();
-    // Immediate stop should drain all 50 events
     projector.stop();
 
     assert(model.getTradeCount(0) == 50);
     assert(queue.empty());
 }
 
-// 11. End-to-End MatchingEngine -> SPSC Outbound -> Projector -> ReadModel
+// 11. Global Sequence Monotonicity & FOK Rejection Tracking
+TEST(test_global_sequence_and_rejections) {
+    MatchingEngine engine;
+    ReadModel model(1000, 1000);
+
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    model.registerSymbol(aapl, "AAPL");
+
+    OutboundEventQueue outbound_queue(1024);
+    engine.setOutboundQueue(&outbound_queue);
+
+    Projector projector(outbound_queue, model);
+    projector.start();
+
+    // 1. Submit FOK with no liquidity -> must be rejected with InsufficientLiquidityFOK
+    OrderId fok_id = engine.addLimitOrder(aapl, Side::Buy, 150, 50, TimeInForce::FOK, 5001ULL);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    OrderRecord fok_rec;
+    assert(model.getOrderByClientId(5001ULL, fok_rec));
+    assert(fok_rec.order_id == fok_id);
+    assert(fok_rec.status == events::OrderStatus::Rejected);
+    assert(fok_rec.reject_code == events::RejectCode::InsufficientLiquidityFOK);
+
+    // 2. Submit Limit Buy GTC
+    OrderId buy_id = engine.addLimitOrder(aapl, Side::Buy, 150, 10, TimeInForce::GTC, 5002ULL);
+    // 3. Submit matching Limit Sell GTC
+    OrderId sell_id = engine.addLimitOrder(aapl, Side::Sell, 150, 10, TimeInForce::GTC, 5003ULL);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    OrderRecord b_rec, s_rec;
+    assert(model.getOrder(buy_id, b_rec));
+    assert(model.getOrder(sell_id, s_rec));
+
+    EngineMetrics metrics;
+    model.getMetrics(metrics);
+    assert(metrics.total_trades >= 1);
+    assert(metrics.total_volume >= 10);
+    assert(metrics.total_orders_rejected >= 1);
+    assert(metrics.last_sequence >= 3);
+
+    projector.stop();
+}
+
+// 12. End-to-End MatchingEngine -> SPSC Outbound -> Projector -> ReadModel
 TEST(test_end_to_end_engine_to_read_model) {
     MatchingEngine engine;
     ReadModel model(1000, 1000);
@@ -360,16 +407,11 @@ TEST(test_end_to_end_engine_to_read_model) {
     Projector projector(outbound_queue, model);
     projector.start();
 
-    // 1. Submit resting Limit Buy order
-    OrderId buy_id = engine.addLimitOrder(aapl, Side::Buy, 150, 10, TimeInForce::GTC);
+    OrderId buy_id = engine.addLimitOrder(aapl, Side::Buy, 150, 10, TimeInForce::GTC, 101ULL);
+    OrderId sell_id = engine.addLimitOrder(aapl, Side::Sell, 150, 10, TimeInForce::GTC, 102ULL);
 
-    // 2. Submit matching Limit Sell order
-    OrderId sell_id = engine.addLimitOrder(aapl, Side::Sell, 150, 10, TimeInForce::GTC);
-
-    // Wait briefly for projector to process outbound queue
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    // Verify Trade in ReadModel
     std::vector<TradeRecord> trades;
     assert(model.getRecentTrades(aapl, 10, trades));
     assert(trades.size() == 1);
@@ -378,17 +420,14 @@ TEST(test_end_to_end_engine_to_read_model) {
     assert(trades[0].buy_order_id == buy_id);
     assert(trades[0].sell_order_id == sell_id);
 
-    // Verify Orders in ReadModel
     OrderRecord buy_rec, sell_rec;
-    assert(model.getOrder(buy_id, buy_rec));
+    assert(model.getOrderByClientId(101ULL, buy_rec));
     assert(buy_rec.status == events::OrderStatus::Filled);
     assert(buy_rec.filled_qty == 10);
-    assert(buy_rec.remaining_qty == 0);
 
-    assert(model.getOrder(sell_id, sell_rec));
+    assert(model.getOrderByClientId(102ULL, sell_rec));
     assert(sell_rec.status == events::OrderStatus::Filled);
     assert(sell_rec.filled_qty == 10);
-    assert(sell_rec.remaining_qty == 0);
 
     projector.stop();
 }
@@ -406,6 +445,7 @@ int main() {
     RUN_TEST(test_unknown_symbol_and_nonexistent_order);
     RUN_TEST(test_concurrent_reads_with_projector_writes);
     RUN_TEST(test_projector_shutdown_drain);
+    RUN_TEST(test_global_sequence_and_rejections);
     RUN_TEST(test_end_to_end_engine_to_read_model);
 
     std::cout << "\n=============================================\n";

@@ -24,37 +24,58 @@ static int failed = 0;
     if (!(cond)) throw std::runtime_error(msg)
 
 // ─────────────────────────────────────────────
-// 1. Limit Order Round Trip
+// 1. Limit Order Round Trip (Legacy & Correlated)
 // ─────────────────────────────────────────────
 TEST(test_limit_order_round_trip) {
-    auto bytes = wire::encode_limit_order(1, Side::Buy, 150, 25, TimeInForce::GTC);
-    ASSERT(bytes.size() == 17, "Expected 17-byte limit order frame");
+    // Legacy 14B payload
+    {
+        auto bytes = wire::encode_limit_order(1, Side::Buy, 150, 25, TimeInForce::GTC);
+        ASSERT(bytes.size() == 17, "Expected 17-byte limit order frame");
 
-    TcpParser parser;
-    parser.append(bytes);
+        TcpParser parser;
+        parser.append(bytes);
 
-    OrderEvent event;
-    ParseError error = ParseError::None;
-    ParseStatus status = parser.parseNext(event, error);
+        OrderEvent event;
+        ParseError error = ParseError::None;
+        ParseStatus status = parser.parseNext(event, error);
 
-    ASSERT(status == ParseStatus::Ok, "Parse status should be Ok");
-    ASSERT(error == ParseError::None, "No parse error expected");
-    ASSERT(event.type == EventType::LimitOrder, "Expected LimitOrder event type");
-    ASSERT(event.instrument == 1, "Expected instrument 1");
-    ASSERT(event.id == 0, "Expected order id 0 for new limit order");
-    ASSERT(event.side == Side::Buy, "Expected Side::Buy");
-    ASSERT(event.price == 150, "Expected price 150");
-    ASSERT(event.qty == 25, "Expected quantity 25");
-    ASSERT(event.tif == TimeInForce::GTC, "Expected TimeInForce::GTC");
-    ASSERT(!parser.hasPartialData(), "Parser should have no remaining bytes");
+        ASSERT(status == ParseStatus::Ok, "Parse status should be Ok");
+        ASSERT(error == ParseError::None, "No parse error expected");
+        ASSERT(event.type == EventType::LimitOrder, "Expected LimitOrder event type");
+        ASSERT(event.instrument == 1, "Expected instrument 1");
+        ASSERT(event.id == 0, "Expected order id 0 for new limit order");
+        ASSERT(event.client_order_id == 0, "Expected cl_ord_id 0");
+        ASSERT(event.side == Side::Buy, "Expected Side::Buy");
+        ASSERT(event.price == 150, "Expected price 150");
+        ASSERT(event.qty == 25, "Expected quantity 25");
+        ASSERT(event.tif == TimeInForce::GTC, "Expected TimeInForce::GTC");
+        ASSERT(!parser.hasPartialData(), "Parser should have no remaining bytes");
+    }
+
+    // Correlated 22B payload
+    {
+        auto bytes = wire::encode_limit_order(1, Side::Buy, 150, 25, TimeInForce::GTC, 999001ULL);
+        ASSERT(bytes.size() == 25, "Expected 25-byte limit order frame");
+
+        TcpParser parser;
+        parser.append(bytes);
+
+        OrderEvent event;
+        ParseError error = ParseError::None;
+        ParseStatus status = parser.parseNext(event, error);
+
+        ASSERT(status == ParseStatus::Ok, "Parse status should be Ok");
+        ASSERT(event.client_order_id == 999001ULL, "Expected cl_ord_id 999001");
+        ASSERT(event.price == 150 && event.qty == 25, "Field mismatch");
+    }
 }
 
 // ─────────────────────────────────────────────
 // 2. Market Order Round Trip
 // ─────────────────────────────────────────────
 TEST(test_market_order_round_trip) {
-    auto bytes = wire::encode_market_order(2, Side::Sell, 50);
-    ASSERT(bytes.size() == 12, "Expected 12-byte market order frame");
+    auto bytes = wire::encode_market_order(2, Side::Sell, 50, 888002ULL);
+    ASSERT(bytes.size() == 20, "Expected 20-byte market order frame with correlation ID");
 
     TcpParser parser;
     parser.append(bytes);
@@ -67,7 +88,7 @@ TEST(test_market_order_round_trip) {
     ASSERT(error == ParseError::None, "No parse error expected");
     ASSERT(event.type == EventType::MarketOrder, "Expected MarketOrder event type");
     ASSERT(event.instrument == 2, "Expected instrument 2");
-    ASSERT(event.id == 0, "Expected order id 0");
+    ASSERT(event.client_order_id == 888002ULL, "Expected cl_ord_id 888002");
     ASSERT(event.side == Side::Sell, "Expected Side::Sell");
     ASSERT(event.price == 0, "Expected price 0 for market order");
     ASSERT(event.qty == 50, "Expected quantity 50");
@@ -79,8 +100,8 @@ TEST(test_market_order_round_trip) {
 // 3. Cancel Order Round Trip
 // ─────────────────────────────────────────────
 TEST(test_cancel_order_round_trip) {
-    auto bytes = wire::encode_cancel_order(1, 123456789ULL);
-    ASSERT(bytes.size() == 15, "Expected 15-byte cancel order frame");
+    auto bytes = wire::encode_cancel_order(1, 123456789ULL, 777003ULL);
+    ASSERT(bytes.size() == 23, "Expected 23-byte cancel order frame with correlation ID");
 
     TcpParser parser;
     parser.append(bytes);
@@ -94,6 +115,7 @@ TEST(test_cancel_order_round_trip) {
     ASSERT(event.type == EventType::CancelOrder, "Expected CancelOrder event type");
     ASSERT(event.instrument == 1, "Expected instrument 1");
     ASSERT(event.id == 123456789ULL, "Expected order id 123456789");
+    ASSERT(event.client_order_id == 777003ULL, "Expected client correlation ID 777003");
     ASSERT(!parser.hasPartialData(), "Parser should have no remaining bytes");
 }
 
@@ -101,8 +123,8 @@ TEST(test_cancel_order_round_trip) {
 // 4. Modify Order Round Trip
 // ─────────────────────────────────────────────
 TEST(test_modify_order_round_trip) {
-    auto bytes = wire::encode_modify_order(3, 987654321ULL, 2800, 15);
-    ASSERT(bytes.size() == 23, "Expected 23-byte modify order frame");
+    auto bytes = wire::encode_modify_order(3, 987654321ULL, 2800, 15, 666004ULL);
+    ASSERT(bytes.size() == 31, "Expected 31-byte modify order frame with correlation ID");
 
     TcpParser parser;
     parser.append(bytes);
@@ -116,6 +138,7 @@ TEST(test_modify_order_round_trip) {
     ASSERT(event.type == EventType::ModifyOrder, "Expected ModifyOrder event type");
     ASSERT(event.instrument == 3, "Expected instrument 3");
     ASSERT(event.id == 987654321ULL, "Expected order id 987654321");
+    ASSERT(event.client_order_id == 666004ULL, "Expected client correlation ID 666004");
     ASSERT(event.price == 2800, "Expected new price 2800");
     ASSERT(event.qty == 15, "Expected new quantity 15");
     ASSERT(!parser.hasPartialData(), "Parser should have no remaining bytes");
@@ -236,7 +259,6 @@ TEST(test_multiple_frames_with_final_partial_frame) {
     std::vector<uint8_t> chunk1;
     chunk1.insert(chunk1.end(), f1.begin(), f1.end());
     chunk1.insert(chunk1.end(), f2.begin(), f2.end());
-    // Append only 5 bytes of f3 (3 header + 2 payload bytes)
     chunk1.insert(chunk1.end(), f3.begin(), f3.begin() + 5);
 
     TcpParser parser;
@@ -268,7 +290,7 @@ TEST(test_multiple_frames_with_final_partial_frame) {
 // 10. Wrong Payload Length
 // ─────────────────────────────────────────────
 TEST(test_wrong_payload_length) {
-    // Limit order requires payload length 14, but declare 13
+    // Limit order requires payload length 14 or 22, but declare 13
     std::vector<uint8_t> frame(wire::HEADER_SIZE + 13, 0);
     wire::write_u16_be(&frame[0], 13);
     frame[2] = static_cast<uint8_t>(wire::MessageType::NewLimitOrder);
@@ -285,11 +307,11 @@ TEST(test_wrong_payload_length) {
 }
 
 // ─────────────────────────────────────────────
-// 11. Payload > 64 (Oversized Frame)
+// 11. Payload > 128 (Oversized Frame)
 // ─────────────────────────────────────────────
 TEST(test_payload_too_large) {
-    std::vector<uint8_t> frame(wire::HEADER_SIZE + 70, 0);
-    wire::write_u16_be(&frame[0], 70); // 70 > 64
+    std::vector<uint8_t> frame(wire::HEADER_SIZE + 150, 0);
+    wire::write_u16_be(&frame[0], 150); // 150 > 128
     frame[2] = static_cast<uint8_t>(wire::MessageType::NewLimitOrder);
 
     TcpParser parser;
@@ -363,7 +385,6 @@ TEST(test_invalid_tif) {
 // ─────────────────────────────────────────────
 TEST(test_zero_quantity) {
     auto frame = wire::encode_limit_order(1, Side::Buy, 100, 0, TimeInForce::GTC);
-    // wire::encode_limit_order encoded qty=0 at offset 12
     TcpParser parser;
     parser.append(frame);
 
@@ -473,6 +494,45 @@ TEST(test_truncated_frame_disconnect) {
 }
 
 // ─────────────────────────────────────────────
+// 19. Ping / Pong Frame Parsing
+// ─────────────────────────────────────────────
+TEST(test_ping_pong_frame_parsing) {
+    auto ping_frame = wire::encode_ping(0x123456789ABCDEF0ULL);
+    ASSERT(ping_frame.size() == 11, "Expected 11-byte ping frame");
+
+    TcpParser parser;
+    parser.append(ping_frame);
+
+    ParsedFrame frame{};
+    ParseError error = ParseError::None;
+    ParseStatus status = parser.parseNextFrame(frame, error);
+
+    ASSERT(status == ParseStatus::Ok, "Expected Ok status");
+    ASSERT(frame.category == FrameCategory::Session, "Expected Session category");
+    ASSERT(frame.session.type == wire::MessageType::Ping, "Expected Ping msg type");
+    ASSERT(frame.session.nonce == 0x123456789ABCDEF0ULL, "Expected nonce match");
+}
+
+// ─────────────────────────────────────────────
+// 20. Query Stats Frame Parsing
+// ─────────────────────────────────────────────
+TEST(test_query_stats_frame_parsing) {
+    auto stats_frame = wire::encode_query_stats();
+    ASSERT(stats_frame.size() == 3, "Expected 3-byte query stats frame");
+
+    TcpParser parser;
+    parser.append(stats_frame);
+
+    ParsedFrame frame{};
+    ParseError error = ParseError::None;
+    ParseStatus status = parser.parseNextFrame(frame, error);
+
+    ASSERT(status == ParseStatus::Ok, "Expected Ok status");
+    ASSERT(frame.category == FrameCategory::Query, "Expected Query category");
+    ASSERT(frame.query.type == wire::MessageType::QueryStats, "Expected QueryStats msg type");
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -496,6 +556,8 @@ int main() {
     RUN(test_invalid_price);
     RUN(test_zero_order_id);
     RUN(test_truncated_frame_disconnect);
+    RUN(test_ping_pong_frame_parsing);
+    RUN(test_query_stats_frame_parsing);
 
     std::cout << "\n=================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

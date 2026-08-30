@@ -28,6 +28,7 @@ class OrderCreateRequest(BaseModel):
     price: Optional[int] = Field(None, description="Limit price (required for limit orders, 1..100000)")
     quantity: int = Field(..., ge=MIN_QUANTITY, description="Order quantity (>= 1)")
     time_in_force: Optional[TimeInForceEnum] = Field(None, description="Time in force (GTC, IOC, FOK)")
+    client_order_id: Optional[int] = Field(None, ge=1, description="Optional client-provided correlation ID")
 
     @field_validator("symbol")
     @classmethod
@@ -60,6 +61,7 @@ class OrderModifyRequest(BaseModel):
     symbol: str = Field(..., description="Instrument symbol")
     new_price: int = Field(..., ge=MIN_PRICE, le=MAX_PRICE, description="New limit price (1..100000)")
     new_quantity: int = Field(..., ge=MIN_QUANTITY, description="New quantity (>= 1)")
+    client_order_id: Optional[int] = Field(None, ge=1, description="Optional client correlation ID")
 
     @field_validator("symbol")
     @classmethod
@@ -75,6 +77,7 @@ class OrderResponse(BaseModel):
     status: str = "ACCEPTED"
     symbol: str
     instrument_id: int
+    client_order_id: Optional[int] = None
     side: str
     order_type: str
     price: Optional[int]
@@ -88,6 +91,7 @@ class CancelResponse(BaseModel):
     symbol: str
     instrument_id: int
     order_id: int
+    client_order_id: Optional[int] = None
     message: str
 
 
@@ -96,6 +100,7 @@ class ModifyResponse(BaseModel):
     symbol: str
     instrument_id: int
     order_id: int
+    client_order_id: Optional[int] = None
     new_price: int
     new_quantity: int
     message: str
@@ -134,6 +139,7 @@ class TradesResponse(BaseModel):
 
 class OrderStateResponse(BaseModel):
     order_id: int
+    client_order_id: int = 0
     symbol: str
     instrument_id: int
     side: str
@@ -142,7 +148,22 @@ class OrderStateResponse(BaseModel):
     remaining_quantity: int
     filled_quantity: int
     status: str
+    reject_code: str = "NONE"
     timestamp: int
+    sequence: int = 0
+
+
+class SystemMetricsResponse(BaseModel):
+    total_trades: int
+    total_volume: int
+    total_orders_accepted: int
+    total_orders_filled: int
+    total_orders_cancelled: int
+    total_orders_rejected: int
+    last_sequence: int
+    tracked_orders_count: int
+    registered_symbols_count: int
+    gateway_connected: bool
 
 
 class GatewayStatus(BaseModel):

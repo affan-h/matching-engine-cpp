@@ -7,12 +7,15 @@ from scripts.client import (
     encode_market_order,
     encode_cancel_order,
     encode_modify_order,
+    encode_ping,
     encode_query_book,
     encode_query_trades,
     encode_query_order,
+    encode_query_stats,
     decode_query_book_response,
     decode_query_trades_response,
     decode_query_order_response,
+    decode_query_stats_response,
     MessageType,
     Side,
     TimeInForce,
@@ -107,6 +110,7 @@ class GatewayTcpClient:
         price: int,
         quantity: int,
         tif: str = "GTC",
+        client_order_id: int = 0,
     ) -> int:
         inst_id = SYMBOL_MAP[symbol]
         w_side = Side.BUY if side.lower() == "buy" else Side.SELL
@@ -118,7 +122,7 @@ class GatewayTcpClient:
         else:
             w_tif = TimeInForce.GTC
 
-        frame = encode_limit_order(inst_id, w_side, price, quantity, w_tif)
+        frame = encode_limit_order(inst_id, w_side, price, quantity, w_tif, client_order_id)
         self._send_bytes(frame)
         return inst_id
 
@@ -127,10 +131,11 @@ class GatewayTcpClient:
         symbol: str,
         side: str,
         quantity: int,
+        client_order_id: int = 0,
     ) -> int:
         inst_id = SYMBOL_MAP[symbol]
         w_side = Side.BUY if side.lower() == "buy" else Side.SELL
-        frame = encode_market_order(inst_id, w_side, quantity)
+        frame = encode_market_order(inst_id, w_side, quantity, client_order_id)
         self._send_bytes(frame)
         return inst_id
 
@@ -138,9 +143,10 @@ class GatewayTcpClient:
         self,
         symbol: str,
         order_id: int,
+        client_order_id: int = 0,
     ) -> int:
         inst_id = SYMBOL_MAP[symbol]
-        frame = encode_cancel_order(inst_id, order_id)
+        frame = encode_cancel_order(inst_id, order_id, client_order_id)
         self._send_bytes(frame)
         return inst_id
 
@@ -150,11 +156,31 @@ class GatewayTcpClient:
         order_id: int,
         new_price: int,
         new_quantity: int,
+        client_order_id: int = 0,
     ) -> int:
         inst_id = SYMBOL_MAP[symbol]
-        frame = encode_modify_order(inst_id, order_id, new_price, new_quantity)
+        frame = encode_modify_order(inst_id, order_id, new_price, new_quantity, client_order_id)
         self._send_bytes(frame)
         return inst_id
+
+    def ping(self, nonce: int = 0) -> int:
+        frame = encode_ping(nonce)
+        with self._lock:
+            for attempt in range(2):
+                if self.sock is None:
+                    self.connect()
+                try:
+                    self.sock.sendall(frame)
+                    msg_type, payload = self._read_response_frame()
+                    if msg_type == MessageType.PONG:
+                        (resp_nonce,) = struct.unpack("!Q", payload)
+                        return resp_nonce
+                    raise GatewayError(f"Unexpected response message type: {msg_type}")
+                except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError) as e:
+                    self.close()
+                    if attempt == 0:
+                        continue
+                    raise GatewayUnavailableError(f"Gateway connection lost during ping: {e}")
 
     # ─────────────────────────────────────────────
     # Query Operations (Read Model)
@@ -203,8 +229,8 @@ class GatewayTcpClient:
                         continue
                     raise GatewayUnavailableError(f"Gateway connection lost during query: {e}")
 
-    def query_order(self, order_id: int) -> Optional[Dict[str, Any]]:
-        frame = encode_query_order(order_id)
+    def query_order(self, order_id: int, by_client_id: bool = False) -> Optional[Dict[str, Any]]:
+        frame = encode_query_order(order_id, by_client_id=by_client_id)
         with self._lock:
             for attempt in range(2):
                 if self.sock is None:
@@ -219,6 +245,24 @@ class GatewayTcpClient:
                             data["symbol"] = ID_TO_SYMBOL_MAP.get(inst_id, "UNKNOWN")
                             return data
                         return None
+                    raise GatewayError(f"Unexpected response message type: {msg_type}")
+                except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError) as e:
+                    self.close()
+                    if attempt == 0:
+                        continue
+                    raise GatewayUnavailableError(f"Gateway connection lost during query: {e}")
+
+    def query_stats(self) -> Dict[str, Any]:
+        frame = encode_query_stats()
+        with self._lock:
+            for attempt in range(2):
+                if self.sock is None:
+                    self.connect()
+                try:
+                    self.sock.sendall(frame)
+                    msg_type, payload = self._read_response_frame()
+                    if msg_type == MessageType.QUERY_STATS_RESP:
+                        return decode_query_stats_response(payload)
                     raise GatewayError(f"Unexpected response message type: {msg_type}")
                 except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError) as e:
                     self.close()

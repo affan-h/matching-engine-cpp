@@ -36,10 +36,12 @@ struct TradeRecord {
     Price price{0};
     Quantity quantity{0};
     Timestamp timestamp{0};
+    uint64_t sequence{0};
 };
 
 struct OrderRecord {
     OrderId order_id{0};
+    uint64_t client_order_id{0};
     InstrumentId instrument_id{0};
     std::string symbol;
     Side side{Side::Buy};
@@ -48,7 +50,21 @@ struct OrderRecord {
     Quantity remaining_qty{0};
     Quantity filled_qty{0};
     events::OrderStatus status{events::OrderStatus::New};
+    events::RejectCode reject_code{events::RejectCode::None};
     Timestamp timestamp{0};
+    uint64_t sequence{0};
+};
+
+struct EngineMetrics {
+    uint64_t total_trades{0};
+    uint64_t total_volume{0};
+    uint64_t total_orders_accepted{0};
+    uint64_t total_orders_filled{0};
+    uint64_t total_orders_cancelled{0};
+    uint64_t total_orders_rejected{0};
+    uint64_t last_sequence{0};
+    size_t   tracked_orders_count{0};
+    size_t   registered_symbols_count{0};
 };
 
 // ─────────────────────────────────────────────
@@ -103,6 +119,7 @@ private:
 
     // Bounded order state history (FIFO eviction)
     std::unordered_map<OrderId, OrderRecord> orders;
+    std::unordered_map<uint64_t, OrderId> client_to_order_id;
     std::deque<OrderId> order_eviction_queue;
     size_t max_orders{10000};
     size_t max_trades_per_symbol{1000};
@@ -110,6 +127,9 @@ private:
     // Symbol registry
     std::unordered_map<InstrumentId, std::string> id_to_symbol;
     std::unordered_map<std::string, InstrumentId> symbol_to_id;
+
+    // Aggregate telemetry metrics
+    EngineMetrics metrics;
 
     void recordOrderInternal(const OrderRecord& record);
 
@@ -132,6 +152,10 @@ public:
     bool getRecentTradesBySymbol(const std::string& symbol, size_t limit, std::vector<TradeRecord>& out) const;
 
     bool getOrder(OrderId id, OrderRecord& out) const;
+    bool getOrderByClientId(uint64_t client_order_id, OrderRecord& out) const;
+
+    bool getMetrics(EngineMetrics& out) const;
+    uint64_t getLastSequence() const;
 
     void getRegisteredSymbols(std::vector<std::pair<InstrumentId, std::string>>& out) const;
     size_t getTradeCount(InstrumentId id) const;

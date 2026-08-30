@@ -50,6 +50,7 @@ void MatchingEngine::publishOutbound(const events::OutboundEvent& event)
 
 void MatchingEngine::emitOrderState(
     OrderId id,
+    uint64_t client_order_id,
     InstrumentId inst,
     Side side,
     Price price,
@@ -57,6 +58,7 @@ void MatchingEngine::emitOrderState(
     Quantity rem_qty,
     Quantity filled_qty,
     events::OrderStatus status,
+    events::RejectCode reject_code,
     Timestamp ts)
 {
     if (!outboundQueue) return;
@@ -64,6 +66,7 @@ void MatchingEngine::emitOrderState(
     events::OutboundEvent evt;
     evt.type = events::OutboundEventType::OrderState;
     evt.order.order_id = id;
+    evt.order.client_order_id = client_order_id;
     evt.order.instrument_id = inst;
     evt.order.side = side;
     evt.order.price = price;
@@ -71,7 +74,9 @@ void MatchingEngine::emitOrderState(
     evt.order.remaining_qty = rem_qty;
     evt.order.filled_qty = filled_qty;
     evt.order.status = status;
+    evt.order.reject_code = reject_code;
     evt.order.timestamp = ts;
+    evt.order.sequence = ++globalSequence;
 
     publishOutbound(evt);
 }
@@ -119,6 +124,7 @@ Trade MatchingEngine::createTrade(
         evt.trade.price = trade.price;
         evt.trade.quantity = trade.quantity;
         evt.trade.timestamp = trade.timestamp;
+        evt.trade.sequence = ++globalSequence;
         publishOutbound(evt);
     }
 
@@ -152,7 +158,7 @@ void MatchingEngine::publishSnapshot(InstrumentId instrument)
         evt.type = events::OutboundEventType::L2Update;
         evt.l2.instrument_id = instrument;
         evt.l2.timestamp = getCurrentTime();
-        evt.l2.sequence = ++l2Sequence;
+        evt.l2.sequence = ++globalSequence;
 
         size_t b_count = std::min(bids.size(), events::MAX_L2_DEPTH);
         evt.l2.bid_count = static_cast<uint8_t>(b_count);
@@ -177,7 +183,8 @@ OrderId MatchingEngine::addLimitOrder(
     Side side,
     Price price,
     Quantity qty,
-    TimeInForce tif = TimeInForce::GTC)
+    TimeInForce tif,
+    uint64_t client_order_id)
 {
     if (__builtin_expect(instrument >= books.size(), 0)) {
         books.resize(instrument + 1);
@@ -200,7 +207,8 @@ OrderId MatchingEngine::addLimitOrder(
     {
         Quantity available = book.getAvailableVolume(side, price);
         if (available < incoming.quantity) {
-            emitOrderState(id, instrument, side, price, qty, 0, 0, events::OrderStatus::Rejected, incoming.timestamp);
+            emitOrderState(id, client_order_id, instrument, side, price, qty, 0, 0,
+                           events::OrderStatus::Rejected, events::RejectCode::InsufficientLiquidityFOK, incoming.timestamp);
             return id;  // Cannot fully fill — cancel entire order, no trades
         }
     }
@@ -222,26 +230,32 @@ OrderId MatchingEngine::addLimitOrder(
             book.reduceAskVolume(best.price, tradeQty);
 
             if (best.quantity == 0) {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty, events::OrderStatus::Filled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty,
+                               events::OrderStatus::Filled, events::RejectCode::None, trade.timestamp);
                 book.removeBestAsk();
             } else {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty, events::OrderStatus::PartiallyFilled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty,
+                               events::OrderStatus::PartiallyFilled, events::RejectCode::None, trade.timestamp);
             }
         }
 
-        // GTC: rest in book. IOC: residual is silently discarded.
+        // GTC: rest in book. IOC: residual is discarded.
         if (incoming.quantity > 0 && incoming.tif == TimeInForce::GTC) {
             book.insertBid(incoming);
             if (incoming.quantity == orig_qty) {
-                emitOrderState(id, instrument, side, price, orig_qty, incoming.quantity, 0, events::OrderStatus::New, incoming.timestamp);
+                emitOrderState(id, client_order_id, instrument, side, price, orig_qty, incoming.quantity, 0,
+                               events::OrderStatus::New, events::RejectCode::None, incoming.timestamp);
             } else {
-                emitOrderState(id, instrument, side, price, orig_qty, incoming.quantity, orig_qty - incoming.quantity, events::OrderStatus::PartiallyFilled, incoming.timestamp);
+                emitOrderState(id, client_order_id, instrument, side, price, orig_qty, incoming.quantity, orig_qty - incoming.quantity,
+                               events::OrderStatus::PartiallyFilled, events::RejectCode::None, incoming.timestamp);
             }
         } else if (incoming.quantity == 0) {
-            emitOrderState(id, instrument, side, price, orig_qty, 0, orig_qty, events::OrderStatus::Filled, incoming.timestamp);
+            emitOrderState(id, client_order_id, instrument, side, price, orig_qty, 0, orig_qty,
+                           events::OrderStatus::Filled, events::RejectCode::None, incoming.timestamp);
         } else {
             // IOC residual discarded
-            emitOrderState(id, instrument, side, price, orig_qty, 0, orig_qty - incoming.quantity, events::OrderStatus::Cancelled, incoming.timestamp);
+            emitOrderState(id, client_order_id, instrument, side, price, orig_qty, 0, orig_qty - incoming.quantity,
+                           events::OrderStatus::Cancelled, events::RejectCode::None, incoming.timestamp);
         }
     }
     else
@@ -259,26 +273,32 @@ OrderId MatchingEngine::addLimitOrder(
             book.reduceBidVolume(best.price, tradeQty);
 
             if (best.quantity == 0) {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty, events::OrderStatus::Filled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty,
+                               events::OrderStatus::Filled, events::RejectCode::None, trade.timestamp);
                 book.removeBestBid();
             } else {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty, events::OrderStatus::PartiallyFilled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty,
+                               events::OrderStatus::PartiallyFilled, events::RejectCode::None, trade.timestamp);
             }
         }
 
-        // GTC: rest in book. IOC: residual is silently discarded.
+        // GTC: rest in book. IOC: residual is discarded.
         if (incoming.quantity > 0 && incoming.tif == TimeInForce::GTC) {
             book.insertAsk(incoming);
             if (incoming.quantity == orig_qty) {
-                emitOrderState(id, instrument, side, price, orig_qty, incoming.quantity, 0, events::OrderStatus::New, incoming.timestamp);
+                emitOrderState(id, client_order_id, instrument, side, price, orig_qty, incoming.quantity, 0,
+                               events::OrderStatus::New, events::RejectCode::None, incoming.timestamp);
             } else {
-                emitOrderState(id, instrument, side, price, orig_qty, incoming.quantity, orig_qty - incoming.quantity, events::OrderStatus::PartiallyFilled, incoming.timestamp);
+                emitOrderState(id, client_order_id, instrument, side, price, orig_qty, incoming.quantity, orig_qty - incoming.quantity,
+                               events::OrderStatus::PartiallyFilled, events::RejectCode::None, incoming.timestamp);
             }
         } else if (incoming.quantity == 0) {
-            emitOrderState(id, instrument, side, price, orig_qty, 0, orig_qty, events::OrderStatus::Filled, incoming.timestamp);
+            emitOrderState(id, client_order_id, instrument, side, price, orig_qty, 0, orig_qty,
+                           events::OrderStatus::Filled, events::RejectCode::None, incoming.timestamp);
         } else {
             // IOC residual discarded
-            emitOrderState(id, instrument, side, price, orig_qty, 0, orig_qty - incoming.quantity, events::OrderStatus::Cancelled, incoming.timestamp);
+            emitOrderState(id, client_order_id, instrument, side, price, orig_qty, 0, orig_qty - incoming.quantity,
+                           events::OrderStatus::Cancelled, events::RejectCode::None, incoming.timestamp);
         }
     }
 
@@ -289,7 +309,8 @@ OrderId MatchingEngine::addLimitOrder(
 OrderId MatchingEngine::addMarketOrder(
     InstrumentId instrument,
     Side side,
-    Quantity qty)
+    Quantity qty,
+    uint64_t client_order_id)
 {
     if (instrument >= books.size()) {
         books.resize(instrument + 1);
@@ -323,10 +344,12 @@ OrderId MatchingEngine::addMarketOrder(
             book.reduceAskVolume(best.price, tradeQty);
 
             if (best.quantity == 0) {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty, events::OrderStatus::Filled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty,
+                               events::OrderStatus::Filled, events::RejectCode::None, trade.timestamp);
                 book.removeBestAsk();
             } else {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty, events::OrderStatus::PartiallyFilled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty,
+                               events::OrderStatus::PartiallyFilled, events::RejectCode::None, trade.timestamp);
             }
         }
     }
@@ -344,18 +367,22 @@ OrderId MatchingEngine::addMarketOrder(
             book.reduceBidVolume(best.price, tradeQty);
 
             if (best.quantity == 0) {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty, events::OrderStatus::Filled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, 0, tradeQty,
+                               events::OrderStatus::Filled, events::RejectCode::None, trade.timestamp);
                 book.removeBestBid();
             } else {
-                emitOrderState(best.id, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty, events::OrderStatus::PartiallyFilled, trade.timestamp);
+                emitOrderState(best.id, 0, instrument, best.side, best.price, best.quantity + tradeQty, best.quantity, tradeQty,
+                               events::OrderStatus::PartiallyFilled, events::RejectCode::None, trade.timestamp);
             }
         }
     }
 
     if (incoming.quantity == 0) {
-        emitOrderState(id, instrument, side, 0, orig_qty, 0, orig_qty, events::OrderStatus::Filled, incoming.timestamp);
+        emitOrderState(id, client_order_id, instrument, side, 0, orig_qty, 0, orig_qty,
+                       events::OrderStatus::Filled, events::RejectCode::None, incoming.timestamp);
     } else {
-        emitOrderState(id, instrument, side, 0, orig_qty, 0, orig_qty - incoming.quantity, events::OrderStatus::Cancelled, incoming.timestamp);
+        emitOrderState(id, client_order_id, instrument, side, 0, orig_qty, 0, orig_qty - incoming.quantity,
+                       events::OrderStatus::Cancelled, events::RejectCode::None, incoming.timestamp);
     }
     
     publishSnapshot(instrument);
@@ -364,34 +391,57 @@ OrderId MatchingEngine::addMarketOrder(
 
 bool MatchingEngine::cancelOrder(
     InstrumentId instrument,
-    OrderId id)
+    OrderId id,
+    uint64_t client_order_id)
 {
-    if (instrument >= books.size()) return false; 
+    if (instrument >= books.size()) {
+        emitOrderState(id, client_order_id, instrument, Side::Buy, 0, 0, 0, 0,
+                       events::OrderStatus::Rejected, events::RejectCode::UnknownInstrument, getCurrentTime());
+        return false;
+    }
     Order order;
     bool found = books[instrument].getOrder(id, order);
     bool ok = books[instrument].cancelOrder(id);
     if (ok) {
-        emitOrderState(id, instrument, found ? order.side : Side::Buy, found ? order.price : 0,
-                       found ? order.quantity : 0, 0, 0, events::OrderStatus::Cancelled, getCurrentTime());
+        emitOrderState(id, client_order_id, instrument, found ? order.side : Side::Buy, found ? order.price : 0,
+                       found ? order.quantity : 0, 0, 0,
+                       events::OrderStatus::Cancelled, events::RejectCode::None, getCurrentTime());
         publishSnapshot(instrument);
+    } else {
+        emitOrderState(id, client_order_id, instrument, Side::Buy, 0, 0, 0, 0,
+                       events::OrderStatus::Rejected, events::RejectCode::OrderNotFound, getCurrentTime());
     }
     return ok;
 }
 
-bool MatchingEngine::modifyOrder(InstrumentId instrument, OrderId id, Price newPrice, Quantity newQty)
+bool MatchingEngine::modifyOrder(
+    InstrumentId instrument,
+    OrderId id,
+    Price newPrice,
+    Quantity newQty,
+    uint64_t client_order_id)
 {
-    if (instrument >= books.size()) return false;
+    if (instrument >= books.size()) {
+        emitOrderState(id, client_order_id, instrument, Side::Buy, 0, 0, 0, 0,
+                       events::OrderStatus::Rejected, events::RejectCode::UnknownInstrument, getCurrentTime());
+        return false;
+    }
     OrderBook& book = books[instrument];
 
     Order oldOrder;
-    if (!book.getOrder(id, oldOrder)) return false;
+    if (!book.getOrder(id, oldOrder)) {
+        emitOrderState(id, client_order_id, instrument, Side::Buy, 0, 0, 0, 0,
+                       events::OrderStatus::Rejected, events::RejectCode::OrderNotFound, getCurrentTime());
+        return false;
+    }
 
     // IN-PLACE MODIFY: Same price, smaller quantity = keep queue position
     if (newPrice == oldOrder.price && newQty < oldOrder.quantity)
     {
         bool ok = book.reduceOrderSize(id, newQty);
         if (ok) {
-            emitOrderState(id, instrument, oldOrder.side, newPrice, oldOrder.quantity, newQty, 0, events::OrderStatus::New, getCurrentTime());
+            emitOrderState(id, client_order_id, instrument, oldOrder.side, newPrice, oldOrder.quantity, newQty, 0,
+                           events::OrderStatus::New, events::RejectCode::None, getCurrentTime());
             publishSnapshot(instrument);
         }
         return ok;
@@ -399,8 +449,9 @@ bool MatchingEngine::modifyOrder(InstrumentId instrument, OrderId id, Price newP
 
     // Otherwise, lose priority: cancel and replace
     book.cancelOrder(id);
-    emitOrderState(id, instrument, oldOrder.side, oldOrder.price, oldOrder.quantity, 0, 0, events::OrderStatus::Cancelled, getCurrentTime());
-    addLimitOrder(instrument, oldOrder.side, newPrice, newQty);
+    emitOrderState(id, client_order_id, instrument, oldOrder.side, oldOrder.price, oldOrder.quantity, 0, 0,
+                   events::OrderStatus::Cancelled, events::RejectCode::None, getCurrentTime());
+    addLimitOrder(instrument, oldOrder.side, newPrice, newQty, TimeInForce::GTC, client_order_id);
     publishSnapshot(instrument);
     return true;
 }

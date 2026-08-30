@@ -39,10 +39,39 @@ void ReadModel::recordOrderInternal(const OrderRecord& record) {
         while (orders.size() >= max_orders && !order_eviction_queue.empty()) {
             OrderId oldest = order_eviction_queue.front();
             order_eviction_queue.pop_front();
-            orders.erase(oldest);
+            auto old_it = orders.find(oldest);
+            if (old_it != orders.end()) {
+                if (old_it->second.client_order_id != 0) {
+                    client_to_order_id.erase(old_it->second.client_order_id);
+                }
+                orders.erase(old_it);
+            }
         }
         order_eviction_queue.push_back(record.order_id);
     }
+
+    if (record.client_order_id != 0) {
+        client_to_order_id[record.client_order_id] = record.order_id;
+    }
+
+    // Update aggregate status metrics
+    switch (record.status) {
+        case events::OrderStatus::New:
+            metrics.total_orders_accepted++;
+            break;
+        case events::OrderStatus::Filled:
+            metrics.total_orders_filled++;
+            break;
+        case events::OrderStatus::Cancelled:
+            metrics.total_orders_cancelled++;
+            break;
+        case events::OrderStatus::Rejected:
+            metrics.total_orders_rejected++;
+            break;
+        default:
+            break;
+    }
+
     orders[record.order_id] = record;
 }
 
@@ -52,6 +81,10 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
     switch (event.type) {
         case events::OutboundEventType::Trade: {
             const auto& p = event.trade;
+            metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+            metrics.total_trades++;
+            metrics.total_volume += p.quantity;
+
             std::string sym = "";
             auto sym_it = id_to_symbol.find(p.instrument_id);
             if (sym_it != id_to_symbol.end()) sym = sym_it->second;
@@ -66,6 +99,7 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
             tr.price = p.price;
             tr.quantity = p.quantity;
             tr.timestamp = p.timestamp;
+            tr.sequence = p.sequence;
 
             auto it = trade_histories.find(p.instrument_id);
             if (it == trade_histories.end()) {
@@ -77,6 +111,8 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
 
         case events::OutboundEventType::L2Update: {
             const auto& p = event.l2;
+            metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+
             std::string sym = "";
             auto sym_it = id_to_symbol.find(p.instrument_id);
             if (sym_it != id_to_symbol.end()) sym = sym_it->second;
@@ -98,12 +134,15 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
 
         case events::OutboundEventType::OrderState: {
             const auto& p = event.order;
+            metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+
             std::string sym = "";
             auto sym_it = id_to_symbol.find(p.instrument_id);
             if (sym_it != id_to_symbol.end()) sym = sym_it->second;
 
             OrderRecord rec;
             rec.order_id = p.order_id;
+            rec.client_order_id = p.client_order_id;
             rec.instrument_id = p.instrument_id;
             rec.symbol = sym;
             rec.side = p.side;
@@ -112,7 +151,9 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
             rec.remaining_qty = p.remaining_qty;
             rec.filled_qty = p.filled_qty;
             rec.status = p.status;
+            rec.reject_code = p.reject_code;
             rec.timestamp = p.timestamp;
+            rec.sequence = p.sequence;
 
             recordOrderInternal(rec);
             break;
@@ -187,6 +228,32 @@ bool ReadModel::getOrder(OrderId id, OrderRecord& out) const {
         return true;
     }
     return false;
+}
+
+bool ReadModel::getOrderByClientId(uint64_t client_order_id, OrderRecord& out) const {
+    std::shared_lock<std::shared_mutex> lock(rw_mutex);
+    auto it = client_to_order_id.find(client_order_id);
+    if (it != client_to_order_id.end()) {
+        auto ord_it = orders.find(it->second);
+        if (ord_it != orders.end()) {
+            out = ord_it->second;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ReadModel::getMetrics(EngineMetrics& out) const {
+    std::shared_lock<std::shared_mutex> lock(rw_mutex);
+    out = metrics;
+    out.tracked_orders_count = orders.size();
+    out.registered_symbols_count = id_to_symbol.size();
+    return true;
+}
+
+uint64_t ReadModel::getLastSequence() const {
+    std::shared_lock<std::shared_mutex> lock(rw_mutex);
+    return metrics.last_sequence;
 }
 
 void ReadModel::getRegisteredSymbols(std::vector<std::pair<InstrumentId, std::string>>& out) const {

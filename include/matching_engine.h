@@ -21,7 +21,7 @@ private:
     uint64_t totalTrades = 0;
 
     OutboundEventQueue*    outboundQueue = nullptr;
-    uint64_t               l2Sequence = 0;
+    uint64_t               globalSequence = 0;
 
     void publishSnapshot(InstrumentId instrument);
 
@@ -31,6 +31,7 @@ private:
     void publishOutbound(const events::OutboundEvent& event);
     void emitOrderState(
         OrderId id,
+        uint64_t client_order_id,
         InstrumentId inst,
         Side side,
         Price price,
@@ -38,12 +39,17 @@ private:
         Quantity rem_qty,
         Quantity filled_qty,
         events::OrderStatus status,
+        events::RejectCode reject_code,
         Timestamp ts
     );
 
 public:
     void setOutboundQueue(OutboundEventQueue* queue) {
         outboundQueue = queue;
+    }
+
+    uint64_t getLastSequence() const {
+        return globalSequence;
     }
 
     // Allow external code to subscribe to market data
@@ -95,25 +101,29 @@ public:
         Side side,
         Price price,
         Quantity qty,
-        TimeInForce tif
+        TimeInForce tif = TimeInForce::GTC,
+        uint64_t client_order_id = 0
     );
 
     OrderId addMarketOrder(
         InstrumentId instrument,
         Side side,
-        Quantity qty
+        Quantity qty,
+        uint64_t client_order_id = 0
     );
 
     bool cancelOrder(
         InstrumentId instrument,
-        OrderId id
+        OrderId id,
+        uint64_t client_order_id = 0
     );
 
     bool modifyOrder(
         InstrumentId instrument,
         OrderId id,
         Price newPrice,
-        Quantity newQty
+        Quantity newQty,
+        uint64_t client_order_id = 0
     );
 
     void printOrderBook(InstrumentId instrument) const;
