@@ -1,6 +1,6 @@
 # Limit Order Book Matching Engine (C++)
 
-A high-performance limit order book matching engine and non-blocking TCP gateway implemented in C++, modeled after the core infrastructure used in electronic trading systems. Built with a focus on deterministic latency, cache-efficient data structures, lock-free thread boundaries, and event-driven network I/O.
+A high-performance limit order book matching engine, non-blocking TCP gateway, and client-facing Python REST API implemented in C++ and Python, modeled after the core infrastructure used in electronic trading systems. Built with a focus on deterministic latency, cache-efficient data structures, lock-free thread boundaries, event-driven network I/O, and clean API separation.
 
 ---
 
@@ -56,7 +56,7 @@ AAPL:
 
 ## What It Does
 
-When two traders place opposing orders at compatible prices, a matching engine pairs them and generates a trade. This project implements that system end-to-end — the data structures, matching logic, memory management, lock-free concurrency layer, non-blocking TCP network gateway, market data feed, and a live terminal dashboard for interacting with the engine in real time.
+When two traders place opposing orders at compatible prices, a matching engine pairs them and generates a trade. This project implements that system end-to-end — the data structures, matching logic, memory management, lock-free concurrency layer, non-blocking TCP network gateway, client-facing HTTP REST API, market data feed, and a live terminal dashboard for interacting with the engine in real time.
 
 ---
 
@@ -64,11 +64,21 @@ When two traders place opposing orders at compatible prices, a matching engine p
 
 ```
 +------------------------------------------------------------------------------+
-|                            EXTERNAL CLIENTS (TCP)                            |
-|             Python Reference Client / Automated Ingestion Scripts            |
+|                  HTTP REST CLIENTS (Web / Python / curl)                     |
 +------------------------------------------------------------------------------+
                                       │
-                                      │ Binary TCP Frames (Big-Endian)
+                                      │ HTTP / JSON
+                                      ▼
++------------------------------------------------------------------------------+
+|                   PYTHON API SERVICE (FastAPI / Pydantic)                    |
+|                                                                              |
+|  - Request validation: symbols, price ranges, quantities, side, TIF          |
+|  - REST endpoints: POST /orders, DELETE /orders, PATCH /orders, GET /book    |
+|  - Active gateway probe: GET /health                                         |
+|  - Thread-safe binary TCP client with automatic reconnect & framing          |
++------------------------------------------------------------------------------+
+                                      │
+                                      │ Binary TCP Frames (Big-Endian Wire Protocol)
                                       ▼
 +------------------------------------------------------------------------------+
 |                  C++ TCP GATEWAY (Producer Thread - kqueue)                  |
@@ -111,7 +121,11 @@ When two traders place opposing orders at compatible prices, a matching engine p
 +------------------------------------------------------------------------------+
 ```
 
-The network gateway and matching core run on separate threads connected by a lock-free Single-Producer Single-Consumer (`SPSCQueue`) ring buffer. The matching engine is strictly single-threaded — zero mutexes on the critical path. The market data feed decouples book state from downstream consumers via subscriber callbacks.
+The system is partitioned into clear architectural boundaries:
+1. **HTTP / REST Layer**: High-level validation and client integration via FastAPI.
+2. **TCP Gateway Layer**: Event-driven I/O multiplexing via macOS `kqueue`.
+3. **Lock-Free Queue Boundary**: Single-Producer Single-Consumer (`SPSCQueue`) ring buffer.
+4. **Matching Engine Core**: Deterministic, zero-allocation matching loop running at memory speed on a dedicated thread.
 
 ---
 
@@ -147,9 +161,9 @@ The engine publishes an `L2Snapshot` (top 10 price levels per side) after every 
 
 A bidirectional map between string symbols (`"AAPL"`, `"RELIANCE"`) and integer `InstrumentId` values sits outside the hot path. The engine routes entirely by integer ID at runtime — zero string operations in the matching loop.
 
-### Why Networking is Outside MatchingEngine
+### Why Networking & HTTP are Outside MatchingEngine
 
-1. **Deterministic Latency**: Network I/O is subject to syscall overhead, socket buffer starvation, network jitter, client stalls, and TCP fragmentation. Isolating all socket handling to the gateway producer thread ensures the matching engine core runs uninterrupted at memory speed.
+1. **Deterministic Latency**: Network I/O and HTTP request parsing are subject to syscall overhead, socket buffer starvation, network jitter, client stalls, and TCP fragmentation. Isolating all networking to outer adapter layers ensures the matching engine core runs uninterrupted.
 2. **Zero Locks on Hot Path**: The gateway thread and matching core communicate exclusively through a single-producer single-consumer (`SPSCQueue`) lock-free ring buffer. There are no mutexes, condition variables, or reader-writer locks in the matching loop.
 3. **Decoupled Framing & Parsing**: All wire format decoding, validation, and framing recovery occur before events reach the queue. The engine consumes only clean, validated internal `OrderEvent` structs.
 
@@ -160,6 +174,82 @@ The gateway uses BSD `kqueue` (`EVFILT_READ`) on non-blocking sockets (`O_NONBLO
 - **Per-Client Connection State**: Each connected descriptor maintains an independent `TcpParser` and receive buffer. One client's partial stream never affects other clients.
 - **Client Buffer Limits**: Enforces a strict 16 KB maximum buffer limit per connection to prevent memory exhaustion from slow/malformed clients.
 - **Bounded Backpressure**: If the lock-free SPSC ring buffer becomes full, the gateway executes bounded retries (`std::this_thread::yield()`). If congestion persists, the gateway disconnects the saturated client rather than dropping orders silently or stalling indefinitely.
+
+---
+
+## Client-Facing Python REST API Service
+
+The Python API service (`FastAPI` + `Pydantic`) provides a standard HTTP interface while speaking the binary wire protocol to the C++ Gateway over TCP.
+
+### Endpoints
+
+| Method | Path | Description | Status Code |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/orders` | Submit Limit (GTC/IOC/FOK) or Market order | `202 Accepted` |
+| `DELETE` | `/orders/{order_id}` | Cancel resting order by ID (`?symbol=AAPL`) | `200 OK` |
+| `PATCH` | `/orders/{order_id}` | Modify resting order price and quantity | `200 OK` |
+| `GET` | `/book/{symbol}` | Query current order book depth for symbol | `200 OK` |
+| `GET` | `/health` | Active probe checking API & C++ Gateway reachability | `200 OK` / `503` |
+
+### Example REST Requests
+
+#### 1. Submit Limit Buy Order
+```bash
+curl -X POST http://127.0.0.1:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "AAPL", "side": "buy", "order_type": "limit", "price": 150, "quantity": 10, "time_in_force": "GTC"}'
+```
+Response (`202 Accepted`):
+```json
+{
+  "status": "ACCEPTED",
+  "symbol": "AAPL",
+  "instrument_id": 0,
+  "side": "buy",
+  "order_type": "limit",
+  "price": 150,
+  "quantity": 10,
+  "time_in_force": "GTC",
+  "message": "Limit order successfully submitted to matching engine gateway"
+}
+```
+
+#### 2. Submit Market Sell Order
+```bash
+curl -X POST http://127.0.0.1:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "INFY", "side": "sell", "order_type": "market", "quantity": 50}'
+```
+
+#### 3. Cancel an Order
+```bash
+curl -X DELETE "http://127.0.0.1:8000/orders/1?symbol=AAPL"
+```
+
+#### 4. Modify an Order
+```bash
+curl -X PATCH http://127.0.0.1:8000/orders/1 \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "AAPL", "new_price": 155, "new_quantity": 5}'
+```
+
+#### 5. Check Health
+```bash
+curl http://127.0.0.1:8000/health
+```
+Response (`200 OK`):
+```json
+{
+  "status": "healthy",
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 12345,
+    "connected": true,
+    "error": null
+  },
+  "symbols": ["AAPL", "RELIANCE", "INFY", "TATASTEEL"]
+}
+```
 
 ---
 
@@ -242,72 +332,21 @@ Per instrument (sample):
 
 ## Test Suites
 
-The project contains 54 automated test cases across 3 dedicated suites:
+The project contains 69 automated test cases across C++ and Python suites:
 
+### 1. C++ Engine & Gateway Tests (54 tests)
+```bash
+make test
 ```
-===== Matching Engine Test Suite =====
-  PASS  test_limit_order_rests_in_book
-  PASS  test_no_match_when_spread_exists
-  PASS  test_full_fill
-  PASS  test_partial_fill_remainder_rests
-  PASS  test_price_priority
-  PASS  test_fifo_same_price
-  PASS  test_cancel_order
-  PASS  test_cancel_nonexistent
-  PASS  test_market_order_matches
-  PASS  test_market_order_empty_book
-  PASS  test_ioc_residual_discarded
-  PASS  test_ioc_no_liquidity
-  PASS  test_multi_level_match
-  PASS  test_multi_instrument_isolation
-  PASS  test_modify_size_down_keeps_priority
-  PASS  test_fok_full_fill_executes
-  PASS  test_fok_partial_fill_cancelled
-  PASS  test_fok_no_liquidity
-Results: 18 passed, 0 failed
+- **`test_engine` (18 tests)**: Core matching semantics (FIFO priority, price priority, GTC/IOC/FOK execution, partial fills, cancellations, multi-instrument isolation).
+- **`test_wire` (18 tests)**: Protocol framing, endian-safe serialization/deserialization, frame length validation, boundary conditions, malformed frame detection.
+- **`test_gateway` (18 tests)**: Real TCP socket integration via kqueue (server lifecycle, client connections, fragmented TCP frames, 1-byte delivery, multiple clients, backpressure, buffer overflow).
 
-===== Wire Protocol & TCP Parser Test Suite =====
-  PASS  test_limit_order_round_trip
-  PASS  test_market_order_round_trip
-  PASS  test_cancel_order_round_trip
-  PASS  test_modify_order_round_trip
-  PASS  test_partial_header
-  PASS  test_partial_payload
-  PASS  test_one_byte_at_a_time
-  PASS  test_multiple_frames_in_one_buffer
-  PASS  test_multiple_frames_with_final_partial_frame
-  PASS  test_wrong_payload_length
-  PASS  test_payload_too_large
-  PASS  test_unknown_message_type
-  PASS  test_invalid_side
-  PASS  test_invalid_tif
-  PASS  test_zero_quantity
-  PASS  test_invalid_price
-  PASS  test_zero_order_id
-  PASS  test_truncated_frame_disconnect
-Results: 18 passed, 0 failed
-
-===== TCP Gateway & kqueue Integration Test Suite =====
-  PASS  test_server_starts_and_stops
-  PASS  test_client_connects_and_disconnects
-  PASS  test_limit_order_reaches_engine
-  PASS  test_market_order_reaches_engine
-  PASS  test_cancel_order_reaches_engine
-  PASS  test_modify_order_reaches_engine
-  PASS  test_fragmented_frame
-  PASS  test_one_byte_at_a_time_frame
-  PASS  test_multiple_frames_in_one_send
-  PASS  test_multiple_frames_with_partial_final_frame
-  PASS  test_malformed_frame
-  PASS  test_oversized_frame
-  PASS  test_unknown_message_type
-  PASS  test_client_disconnect_handling
-  PASS  test_disconnect_during_partial_frame
-  PASS  test_multiple_simultaneous_clients
-  PASS  test_queue_full_behavior
-  PASS  test_buffer_overflow_protection
-Results: 18 passed, 0 failed
+### 2. Python REST API Tests (15 tests)
+```bash
+make test-api
 ```
+- **`test_api` (15 tests)**: HTTP endpoint validation, Pydantic bounds checks, invalid symbols/sides/prices, gateway unreachable handling, health probes, and end-to-end HTTP -> FastAPI -> TCP Client -> C++ Gateway -> Matching Engine execution.
 
 ---
 
@@ -324,6 +363,7 @@ Results: 18 passed, 0 failed
 | Feed delivery | callback subscribers | polling | Decoupled, extensible |
 | Symbol routing | integer InstrumentId | string map | No string ops in hot path |
 | Network I/O | kqueue event loop | thread-per-client | Scalable non-blocking multiplexing |
+| Client API | FastAPI REST adapter | direct HTTP in C++ | Decouples web/JSON from matching core |
 
 ---
 
@@ -342,37 +382,60 @@ Results: 18 passed, 0 failed
 
 ## How to Build and Run
 
-**Dependencies:** Google Benchmark (benchmarks only), C++17 compiler, Python 3.8+
+### Prerequisites
+- C++17 compiler (Clang / Apple LLVM or GCC)
+- Google Benchmark (`brew install google-benchmark`, for benchmarks only)
+- Python 3.8+ (for API service and test client)
 
-**All Unit and Integration Tests:**
+### Build Targets
+
 ```bash
+# 1. Run all C++ unit and integration test suites
 make test
-```
 
-**Run Benchmarks (requires Google Benchmark):**
-```bash
+# 2. Run Python REST API unit and integration test suites
+make test-api
+
+# 3. Run Google Benchmark latency suite
 make bench
-```
 
-**Multi-Instrument Simulation:**
-```bash
+# 4. Run multi-threaded 5M order simulation
 make sim
-```
 
-**Interactive CLI:**
-```bash
+# 5. Run interactive terminal CLI
 make cli
+
+# 6. Build the C++ TCP Gateway binary
+make gateway
 ```
 
-**Build and Run the TCP Gateway:**
+### Running the End-to-End System
+
+#### Step 1: Start the C++ TCP Gateway
+In terminal 1:
 ```bash
-make gateway
 ./gateway 12345
 ```
 
-**Send Orders via Python Reference Client:**
+#### Step 2: Start the Python REST API Service
+In terminal 2:
 ```bash
-python3 scripts/client.py --demo 12345
+make api
+```
+The FastAPI application starts on `http://127.0.0.1:8000`.
+
+#### Step 3: Send Orders via HTTP
+In terminal 3:
+```bash
+# Submit Buy Limit order
+curl -X POST http://127.0.0.1:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "AAPL", "side": "buy", "order_type": "limit", "price": 150, "quantity": 10, "time_in_force": "GTC"}'
+
+# Submit matching Sell Limit order
+curl -X POST http://127.0.0.1:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "AAPL", "side": "sell", "order_type": "limit", "price": 150, "quantity": 10, "time_in_force": "GTC"}'
 ```
 
 ---
@@ -401,6 +464,13 @@ src/
   tcp_gateway.cpp       kqueue event loop, non-blocking I/O, SPSC handoff
   gateway_main.cpp      Standalone TCP gateway entry point
 
+api/
+  __init__.py           API module definition
+  config.py             Gateway host/port settings & symbol mapping
+  models.py             Pydantic models for order requests/responses
+  tcp_client.py         Thread-safe binary TCP client for C++ gateway
+  main.py               FastAPI application, routes, and exception handlers
+
 scripts/
   client.py             Python binary protocol encoder and TCP reference client
 
@@ -411,6 +481,7 @@ tests/
   test_engine.cpp       18-case matching engine correctness suite
   test_wire_protocol.cpp 18-case wire protocol & parser test suite
   test_gateway.cpp      18-case TCP kqueue gateway integration test suite
+  test_api.py           15-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark harness with naive baseline
 ```
 
@@ -422,12 +493,13 @@ tests/
 2. **Double GTC Insertion**: A double insertion bug caused GTC orders to be inserted twice into the order book after partial matches. Fixed by removing the unconditional insert that followed the TIF-gated insert.
 3. **Benchmark Instrument Registration**: Fixed an uncaught `Unknown instrument id` runtime exception in benchmark runs by registering `"AAPL"` explicitly before order dispatch.
 4. **Signal Safety on Closed Sockets (`SIGPIPE`)**: Writing to disconnected client sockets raised `SIGPIPE` (Exit 141). Resolved by setting `std::signal(SIGPIPE, SIG_IGN)` and configuring `SO_NOSIGPIPE` on macOS sockets.
+5. **Socket Port Reuse (`SO_REUSEPORT`)**: Enabled `SO_REUSEPORT` alongside `SO_REUSEADDR` to eliminate port binding collisions during rapid test execution.
 
 ---
 
 ## What This Is Not
 
-This is an educational electronic exchange simulation and gateway, not a production trading system. It does not include persistent WAL recovery, FIX protocol compliance, multi-core sharding, or regulatory auditing.
+This is an educational electronic exchange simulation, gateway, and REST adapter, not a production trading system. It does not include persistent WAL recovery, FIX protocol compliance, multi-core sharding, or regulatory auditing.
 
 ---
 

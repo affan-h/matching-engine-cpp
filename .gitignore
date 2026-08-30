@@ -11,3 +11,7 @@ bench
 *.out
 .DS_Store
 .vscode
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

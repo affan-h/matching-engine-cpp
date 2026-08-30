@@ -34,14 +34,12 @@ bool TcpGateway::start() {
         return false;
     }
 
-    // 2. Set SO_REUSEADDR
+    // 2. Set SO_REUSEADDR and SO_REUSEPORT
     int opt = 1;
-    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        std::cerr << "[TcpGateway] setsockopt(SO_REUSEADDR) failed\n";
-        close(listen_fd);
-        listen_fd = -1;
-        return false;
-    }
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
 
     // 3. Set non-blocking mode
     int flags = fcntl(listen_fd, F_GETFL, 0);
