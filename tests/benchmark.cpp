@@ -109,7 +109,7 @@ BENCHMARK(BM_Naive_Cancel)->Unit(benchmark::kNanosecond);
 // ---------------------------------------------
 static void BM_InsertOrder(benchmark::State& state) {
     MatchingEngine engine;
-    InstrumentId aapl = 1;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
 
     // Pre-warm: insert and cancel enough orders to fill the pool's free-list
     // so every benchmark iteration reuses memory (steady state)
@@ -135,7 +135,7 @@ BENCHMARK(BM_InsertOrder)->Unit(benchmark::kNanosecond);
 // ---------------------------------------------
 static void BM_MatchOrder(benchmark::State& state) {
     MatchingEngine engine;
-    InstrumentId aapl = 1;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
 
     for (auto _ : state) {
         // 1. PAUSE the timer: We are setting up the state, don't measure this!
@@ -158,7 +158,7 @@ BENCHMARK(BM_MatchOrder)->Unit(benchmark::kNanosecond);
 // ---------------------------------------------
 static void BM_CancelOrder(benchmark::State& state) {
     MatchingEngine engine;
-    InstrumentId aapl = 1;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
 
     for (auto _ : state) {
         // Pause: insert a resting order to cancel (don't measure this)
@@ -178,7 +178,7 @@ BENCHMARK(BM_CancelOrder)->Unit(benchmark::kNanosecond);
 // ---------------------------------------------
 static void BM_CancelOrder_Contention(benchmark::State& state) {
     MatchingEngine engine;
-    InstrumentId aapl = 1;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
     const int N = 1000;
 
     // Fill one price level with N resting orders
