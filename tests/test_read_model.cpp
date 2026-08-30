@@ -432,6 +432,116 @@ TEST(test_end_to_end_engine_to_read_model) {
     projector.stop();
 }
 
+// 13. Order State Regression Prevention (Stale / Out-of-Order Events)
+TEST(test_order_state_regression_prevention) {
+    ReadModel model(100, 100);
+    model.registerSymbol(0, "AAPL");
+
+    // 1. Order Filled at sequence 10
+    events::OutboundEvent e_filled;
+    e_filled.type = events::OutboundEventType::OrderState;
+    e_filled.order.order_id = 42;
+    e_filled.order.instrument_id = 0;
+    e_filled.order.status = events::OrderStatus::Filled;
+    e_filled.order.filled_qty = 100;
+    e_filled.order.remaining_qty = 0;
+    e_filled.order.sequence = 10;
+    model.applyEvent(e_filled);
+
+    OrderRecord rec;
+    assert(model.getOrder(42, rec));
+    assert(rec.status == events::OrderStatus::Filled);
+
+    // 2. Delayed Stale New event with older sequence 5 arrives -> must NOT overwrite
+    events::OutboundEvent e_stale;
+    e_stale.type = events::OutboundEventType::OrderState;
+    e_stale.order.order_id = 42;
+    e_stale.order.instrument_id = 0;
+    e_stale.order.status = events::OrderStatus::New;
+    e_stale.order.filled_qty = 0;
+    e_stale.order.remaining_qty = 100;
+    e_stale.order.sequence = 5;
+    model.applyEvent(e_stale);
+
+    assert(model.getOrder(42, rec));
+    assert(rec.status == events::OrderStatus::Filled);
+    assert(rec.sequence == 10);
+}
+
+// 14. Client Order ID Eviction Safety (Duplicate / Reused Client ID)
+TEST(test_client_order_id_eviction_safety) {
+    // Capacity 2 orders
+    ReadModel model(2, 100);
+    model.registerSymbol(0, "AAPL");
+
+    // Order 1 with client_order_id = 777
+    events::OutboundEvent e1;
+    e1.type = events::OutboundEventType::OrderState;
+    e1.order.order_id = 1;
+    e1.order.client_order_id = 777;
+    e1.order.instrument_id = 0;
+    e1.order.status = events::OrderStatus::Filled;
+    e1.order.sequence = 1;
+    model.applyEvent(e1);
+
+    // Order 2 with client_order_id = 888
+    events::OutboundEvent e2;
+    e2.type = events::OutboundEventType::OrderState;
+    e2.order.order_id = 2;
+    e2.order.client_order_id = 888;
+    e2.order.instrument_id = 0;
+    e2.order.status = events::OrderStatus::Filled;
+    e2.order.sequence = 2;
+    model.applyEvent(e2);
+
+    // Order 3 reuses client_order_id = 777 -> evicts Order 1
+    events::OutboundEvent e3;
+    e3.type = events::OutboundEventType::OrderState;
+    e3.order.order_id = 3;
+    e3.order.client_order_id = 777;
+    e3.order.instrument_id = 0;
+    e3.order.status = events::OrderStatus::New;
+    e3.order.sequence = 3;
+    model.applyEvent(e3);
+
+    OrderRecord rec;
+    assert(model.getOrderByClientId(777, rec));
+    assert(rec.order_id == 3); // Must point to active Order 3, not erased!
+}
+
+// 15. Multi-Instrument Causal Monotonic Sequencing
+TEST(test_multi_instrument_causal_sequencing) {
+    MatchingEngine engine;
+    ReadModel model(1000, 1000);
+
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId rel  = engine.registerInstrument("RELIANCE");
+    InstrumentId infy = engine.registerInstrument("INFY");
+    model.registerSymbol(aapl, "AAPL");
+    model.registerSymbol(rel, "RELIANCE");
+    model.registerSymbol(infy, "INFY");
+
+    OutboundEventQueue queue(1024);
+    engine.setOutboundQueue(&queue);
+
+    Projector projector(queue, model);
+    projector.start();
+
+    // Submit interleaved orders across 3 instruments
+    engine.addLimitOrder(aapl, Side::Buy, 150, 10, TimeInForce::GTC);
+    engine.addLimitOrder(rel, Side::Buy, 2800, 5, TimeInForce::GTC);
+    engine.addLimitOrder(infy, Side::Buy, 1400, 20, TimeInForce::GTC);
+    engine.addLimitOrder(aapl, Side::Sell, 150, 10, TimeInForce::GTC);
+    engine.addLimitOrder(rel, Side::Sell, 2800, 5, TimeInForce::GTC);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    uint64_t last_seq = model.getLastSequence();
+    assert(last_seq >= 5);
+
+    projector.stop();
+}
+
 int main() {
     std::cout << "\n===== Read Model & Projector Test Suite =====\n\n";
 
@@ -447,6 +557,9 @@ int main() {
     RUN_TEST(test_projector_shutdown_drain);
     RUN_TEST(test_global_sequence_and_rejections);
     RUN_TEST(test_end_to_end_engine_to_read_model);
+    RUN_TEST(test_order_state_regression_prevention);
+    RUN_TEST(test_client_order_id_eviction_safety);
+    RUN_TEST(test_multi_instrument_causal_sequencing);
 
     std::cout << "\n=============================================\n";
     std::cout << "Results: " << passed << " passed, 0 failed\n\n";

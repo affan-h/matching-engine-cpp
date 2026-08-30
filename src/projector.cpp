@@ -9,15 +9,19 @@ Projector::~Projector() {
 }
 
 bool Projector::start() {
-    if (is_running.load(std::memory_order_relaxed)) return true;
-    is_running.store(true, std::memory_order_release);
+    bool expected = false;
+    if (!is_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return true;
+    }
     worker_thread = std::thread(&Projector::run, this);
     return true;
 }
 
 void Projector::stop() {
-    if (!is_running.load(std::memory_order_relaxed)) return;
-    is_running.store(false, std::memory_order_release);
+    bool expected = true;
+    if (!is_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+        return;
+    }
 
     if (worker_thread.joinable()) {
         worker_thread.join();

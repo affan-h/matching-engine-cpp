@@ -355,6 +355,63 @@ TEST(test_fok_no_liquidity) {
 }
 
 // ─────────────────────────────────────────────
+// Test: Invalid Price / Quantity Rejection
+// ─────────────────────────────────────────────
+TEST(test_invalid_price_and_quantity_rejections) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+    OutboundEventQueue queue(64);
+    engine.setOutboundQueue(&queue);
+
+    // Price 0
+    engine.addLimitOrder(inst, Side::Buy, 0, 10, TimeInForce::GTC, 101ULL);
+    events::OutboundEvent e1;
+    ASSERT(queue.pop(e1), "Expected rejection event");
+    ASSERT(e1.type == events::OutboundEventType::OrderState, "Expected OrderState event");
+    ASSERT(e1.order.status == events::OrderStatus::Rejected, "Expected Rejected status");
+    ASSERT(e1.order.reject_code == events::RejectCode::InvalidPriceQty, "Expected InvalidPriceQty");
+    ASSERT(e1.order.client_order_id == 101ULL, "Expected client_order_id match");
+
+    // Quantity 0
+    engine.addLimitOrder(inst, Side::Buy, 100, 0, TimeInForce::GTC, 102ULL);
+    events::OutboundEvent e2;
+    ASSERT(queue.pop(e2), "Expected rejection event");
+    ASSERT(e2.order.status == events::OrderStatus::Rejected, "Expected Rejected status");
+    ASSERT(e2.order.reject_code == events::RejectCode::InvalidPriceQty, "Expected InvalidPriceQty");
+
+    // Price > 100000
+    engine.addLimitOrder(inst, Side::Buy, 100001, 10, TimeInForce::GTC, 103ULL);
+    events::OutboundEvent e3;
+    ASSERT(queue.pop(e3), "Expected rejection event");
+    ASSERT(e3.order.status == events::OrderStatus::Rejected, "Expected Rejected status");
+    ASSERT(e3.order.reject_code == events::RejectCode::InvalidPriceQty, "Expected InvalidPriceQty");
+
+    // Market order quantity 0
+    engine.addMarketOrder(inst, Side::Buy, 0, 104ULL);
+    events::OutboundEvent e4;
+    ASSERT(queue.pop(e4), "Expected rejection event");
+    ASSERT(e4.order.status == events::OrderStatus::Rejected, "Expected Rejected status");
+    ASSERT(e4.order.reject_code == events::RejectCode::InvalidPriceQty, "Expected InvalidPriceQty");
+}
+
+// ─────────────────────────────────────────────
+// Test: Cancel Nonexistent Order Rejection Code
+// ─────────────────────────────────────────────
+TEST(test_cancel_nonexistent_order_rejection) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+    OutboundEventQueue queue(64);
+    engine.setOutboundQueue(&queue);
+
+    engine.cancelOrder(inst, 99999, 201ULL);
+    events::OutboundEvent e;
+    ASSERT(queue.pop(e), "Expected rejection event");
+    ASSERT(e.order.status == events::OrderStatus::Rejected, "Expected Rejected status");
+    ASSERT(e.order.reject_code == events::RejectCode::OrderNotFound, "Expected OrderNotFound");
+    ASSERT(e.order.client_order_id == 201ULL, "Expected client_order_id match");
+}
+
+// ─────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────
 int main() {
@@ -378,6 +435,8 @@ int main() {
     RUN(test_fok_full_fill_executes);
     RUN(test_fok_partial_fill_cancelled);
     RUN(test_fok_no_liquidity);
+    RUN(test_invalid_price_and_quantity_rejections);
+    RUN(test_cancel_nonexistent_order_rejection);
 
     std::cout << "\n======================================\n";
     std::cout << "Results: " << passed << " passed, "

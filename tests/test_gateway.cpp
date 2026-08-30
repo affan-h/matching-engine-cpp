@@ -835,6 +835,143 @@ TEST(test_query_stats_over_tcp) {
 }
 
 // ─────────────────────────────────────────────
+// 24. Shutdown with Active Connected Clients
+// ─────────────────────────────────────────────
+TEST(test_shutdown_with_active_connected_clients) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    int c1 = connect_client(gateway.getBoundPort());
+    int c2 = connect_client(gateway.getBoundPort());
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    ASSERT(gateway.getClientCount() == 2, "Expected 2 connected clients");
+
+    // Immediate shutdown while clients remain connected
+    gateway.stop();
+
+    ASSERT(!gateway.isRunning(), "Gateway must report not running");
+    ASSERT(gateway.getClientCount() == 0, "All clients must be closed");
+
+    close(c1);
+    close(c2);
+}
+
+// ─────────────────────────────────────────────
+// 25. Shutdown with Partial Frame In-Flight
+// ─────────────────────────────────────────────
+TEST(test_shutdown_with_partial_frame) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    int c1 = connect_client(gateway.getBoundPort());
+    auto frame = wire::encode_limit_order(aapl, Side::Buy, 150, 10, TimeInForce::GTC);
+
+    // Send only 5 bytes of 17
+    send_all(c1, frame.data(), 5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // Shutdown with partial frame in buffer
+    gateway.stop();
+
+    ASSERT(!gateway.isRunning(), "Gateway must report stopped");
+    close(c1);
+}
+
+// ─────────────────────────────────────────────
+// 26. Shutdown Drains Pending Queued Commands
+// ─────────────────────────────────────────────
+TEST(test_shutdown_with_pending_queued_commands) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+
+    // Push 50 limit orders
+    std::vector<uint8_t> batch;
+    for (int i = 0; i < 50; ++i) {
+        auto f = wire::encode_limit_order(aapl, Side::Buy, 100 + (i % 10), 1, TimeInForce::GTC, 1000 + i);
+        batch.insert(batch.end(), f.begin(), f.end());
+    }
+    send_all(client, batch);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    // Stop gateway immediately
+    gateway.stop();
+
+    // Verify all 50 events were drained and processed by engine
+    ASSERT(gateway.getStats().events_processed == 50, "Expected all 50 queued events to be processed during drain");
+
+    close(client);
+}
+
+// ─────────────────────────────────────────────
+// 27. Shutdown Idempotency
+// ─────────────────────────────────────────────
+TEST(test_shutdown_idempotency) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    // Call stop multiple times sequentially
+    gateway.stop();
+    gateway.stop();
+    gateway.stop();
+
+    ASSERT(!gateway.isRunning(), "Gateway should remain cleanly stopped");
+}
+
+// ─────────────────────────────────────────────
+// 28. Rapid Reconnect Burst
+// ─────────────────────────────────────────────
+TEST(test_rapid_reconnect_burst) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    gateway.start();
+
+    for (int i = 0; i < 20; ++i) {
+        int client = connect_client(gateway.getBoundPort());
+        auto ping = wire::encode_ping(i);
+        send_all(client, ping);
+        auto [type, payload] = recv_response(client);
+        ASSERT(type == wire::MessageType::Pong, "Expected Pong response");
+        ASSERT(wire::read_u64_be(payload.data()) == static_cast<uint64_t>(i), "Nonce match");
+        close(client);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT(gateway.getClientCount() == 0, "All clients should be cleanly disconnected");
+
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -864,6 +1001,11 @@ int main() {
     RUN(test_query_trades_over_tcp);
     RUN(test_query_order_over_tcp);
     RUN(test_query_stats_over_tcp);
+    RUN(test_shutdown_with_active_connected_clients);
+    RUN(test_shutdown_with_partial_frame);
+    RUN(test_shutdown_with_pending_queued_commands);
+    RUN(test_shutdown_idempotency);
+    RUN(test_rapid_reconnect_burst);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

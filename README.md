@@ -104,7 +104,7 @@ When two traders place opposing orders at compatible prices, a matching engine p
 |  - Bitmaps: __builtin_clzll / __builtin_ctzll for instantaneous best bid/ask            |
 |  - Intrusive doubly linked list & pre-warmed memory pool allocator                      |
 |  - Explicit order state lifecycle (New, PartiallyFilled, Filled, Cancelled, Rejected)  |
-|  - Deterministic rejection reason codes (InsufficientLiquidityFOK, UnknownInstrument)   |
+|  - Deterministic rejection reason codes (InsufficientLiquidityFOK, InvalidPriceQty)    |
 |  - Emits fixed-size POD outbound events (Trade, L2Update, OrderState)                   |
 +-----------------------------------------------------------------------------------------+
                                            │
@@ -132,6 +132,7 @@ When two traders place opposing orders at compatible prices, a matching engine p
 |  - Bounded Trade History: fixed circular buffer (1000 trades/symbol, FIFO eviction)     |
 |  - Bounded Order History: tracked order states (10,000 orders, FIFO eviction)           |
 |  - Client Correlation Index: O(1) client_order_id -> OrderId bidirectional lookup       |
+|  - Monotonic State Preservation: terminal states (Filled/Cancelled/Rejected) protected  |
 |  - Platform Telemetry: aggregate trades, volume, acceptance, rejections, last sequence  |
 |  - Query Synchronization: std::shared_mutex (concurrent multi-reader access)            |
 +-----------------------------------------------------------------------------------------+
@@ -151,7 +152,7 @@ The system strictly enforces the CQRS (Command Query Responsibility Segregation)
 
 ---
 
-## Core Design Decisions
+## Core Design Decisions & Reliability Guarantees
 
 ### Price Ladder (vector instead of std::map)
 
@@ -183,21 +184,15 @@ Every state change emitted by the engine includes a strictly increasing 64-bit g
 
 The matching engine emits explicit `OrderStatus::Rejected` events with standardized `RejectCode` enums (`InsufficientLiquidityFOK`, `UnknownInstrument`, `InvalidPriceQty`, `OrderNotFound`, `QueueFull`), providing unambiguous feedback for unfillable or invalid orders.
 
-### Outbound Events & Bounded SPSC Queue
+### Monotonic Order State Preservation in ReadModel
 
-Outbound events (`TradeEventPayload`, `L2UpdateEventPayload`, `OrderStateEventPayload`) are packaged into fixed-size POD structs with zero dynamic allocation (`std::string` and `std::vector` are completely avoided on the matching thread).
-- **Memory Ordering**: Uses `std::memory_order_release` on writes and `std::memory_order_acquire` on reads.
-- **Full-Queue / Backpressure Policy**:
-  - `Trade` and `OrderState` execution events are non-droppable and use bounded yield retries to guarantee history consistency.
-  - `L2Update` snapshots are coalesced/dropped if congested, as the subsequent snapshot contains the superseding latest book state.
+The in-memory ReadModel guarantees that terminal order states (`Filled`, `Cancelled`, `Rejected`) cannot regress if older/stale events arrive out of order, ensuring eventual consistency never produces invalid state transitions.
 
-### Bounded In-Memory Read Model & Observability Metrics
+### Graceful Sequential Teardown
 
-- **L2 Book State**: Retains the latest depth snapshot per instrument (top 10 levels, sequence number, timestamp).
-- **Trade History**: Fixed circular buffer (`BoundedTradeHistory`) capped at 1,000 trades per symbol. When capacity is reached, new trades overwrite the oldest entries (FIFO eviction).
-- **Order State History**: Bounded lookup table capped at 10,000 orders with automatic eviction of oldest orders.
-- **Client Correlation Index**: Hash index mapping `client_order_id -> OrderId` for $O(1)$ client-order lookup.
-- **Platform Telemetry**: Aggregate counters (`total_trades`, `total_volume`, `total_orders_accepted`, `total_orders_filled`, `total_orders_cancelled`, `total_orders_rejected`, `last_sequence`).
+Shutdown executes in strict dependency order:
+1. `TcpGateway::stop()`: closes listen socket and kqueue, terminates event loop, closes all active client connections, and drains all remaining commands from the SPSC command queue into the engine.
+2. `Projector::stop()`: drains all remaining execution and order state events from the outbound SPSC queue into the `ReadModel`, then joins worker threads cleanly without memory leaks or dropped events.
 
 ---
 
@@ -328,10 +323,10 @@ Measured on Apple Silicon / macOS, compiled with `g++ -O3`. Compared against a n
 
 | Operation                       | Naive    | Optimized | Notes                     |
 |--------------------------------|----------|-----------|---------------------------|
-| Insert                         | 4309 ns  | 6983 ns   | Price ladder + index setup|
-| Match                          | 3150 ns  | 5654 ns   | Contention / book updates |
-| Cancel (isolated)              | 3255 ns  | 5354 ns   | Cold cache direct index   |
-| Cancel (under contention)      | 6678 ns  | 8272 ns   | Contention benchmark      |
+| Insert                         | 3403 ns  | 6310 ns   | Price ladder + index setup|
+| Match                          | 4226 ns  | 4501 ns   | Contention / book updates |
+| Cancel (isolated)              | 4087 ns  | 4810 ns   | Cold cache direct index   |
+| Cancel (under contention)      | 5388 ns  | 6836 ns   | Contention benchmark      |
 
 **On insert latency:** The optimized engine is slower on insert because its data structures (price ladder + orderLookup vector) are significantly larger than a `std::map`, causing cold cache misses on first access. This is a deliberate tradeoff — real matching engines experience far more cancel operations than inserts during volatile markets, so $O(1)$ cancel is the higher-value optimization.
 
@@ -358,22 +353,22 @@ Per instrument (sample):
 
 ## Test Suites
 
-The project contains **95 automated test cases** across C++ and Python suites:
+The project contains **107 automated test cases** across C++ and Python suites:
 
-### 1. C++ Engine, Gateway & Read Model Tests (73 tests)
+### 1. C++ Engine, Gateway & Read Model Tests (83 tests)
 ```bash
 make test
 ```
-- **`test_engine` (18 tests)**: Core matching semantics (FIFO priority, price priority, GTC/IOC/FOK execution, partial fills, cancellations, multi-instrument isolation).
+- **`test_engine` (20 tests)**: Core matching semantics (FIFO priority, price priority, GTC/IOC/FOK execution, partial fills, cancellations, multi-instrument isolation, invalid price/qty rejections, nonexistent cancel rejection reason codes).
 - **`test_wire` (20 tests)**: Protocol framing, endian-safe serialization/deserialization, frame length validation, boundary conditions, malformed frame detection, Ping/Pong framing, and QueryStats decoding.
-- **`test_gateway` (23 tests)**: Real TCP socket integration via kqueue (server lifecycle, client connections, fragmented TCP frames, 1-byte delivery, multiple clients, backpressure, buffer overflow, TCP Ping/Pong, TCP queries for book/trades/orders/stats, and correlation ID routing).
-- **`test_read_model` (12 tests)**: ReadModel event application, monotonic global sequencing, FOK rejection reason codes, client correlation index lookup (`getOrderByClientId`), aggregate metrics computation (`getMetrics`), multi-reader thread safety, and clean shutdown drain.
+- **`test_gateway` (28 tests)**: Real TCP socket integration via kqueue (server lifecycle, client connections, fragmented TCP frames, 1-byte delivery, multiple clients, backpressure, buffer overflow, TCP Ping/Pong, TCP queries for book/trades/orders/stats, correlation ID routing, shutdown with active clients, shutdown with partial frames, shutdown command drain, shutdown idempotency, and rapid reconnect bursts).
+- **`test_read_model` (15 tests)**: ReadModel event application, monotonic global sequencing, FOK rejection reason codes, client correlation index lookup (`getOrderByClientId`), aggregate metrics computation (`getMetrics`), multi-reader thread safety, clean shutdown drain, order state regression prevention, client correlation eviction safety, and multi-instrument causal ordering.
 
-### 2. Python REST API Tests (22 tests)
+### 2. Python REST API Tests (24 tests)
 ```bash
 make test-api
 ```
-- **`test_api` (22 tests)**: HTTP endpoint validation, Pydantic bounds checks, invalid symbols/sides/prices, gateway unreachable handling, health probes, `/book/{symbol}`, `/trades/{symbol}`, `/orders/{order_id}`, `/orders/{client_order_id}?by_client_id=true`, `/metrics`, and full end-to-end HTTP $\to$ FastAPI $\to$ TCP Client $\to$ C++ Gateway $\to$ Matching Engine $\to$ Read Model execution with client correlation verification.
+- **`test_api` (24 tests)**: HTTP endpoint validation, Pydantic bounds checks, invalid symbols/sides/prices, gateway unreachable handling, health probes, `/book/{symbol}`, `/trades/{symbol}`, `/orders/{order_id}`, `/orders/{client_order_id}?by_client_id=true`, `/metrics`, socket reconnect resilience, exhaustive HTTP status code contract (400, 404, 422, 503, 202), and full end-to-end HTTP $\to$ FastAPI $\to$ TCP Client $\to$ C++ Gateway $\to$ Matching Engine $\to$ Read Model execution.
 
 ---
 
@@ -522,11 +517,11 @@ tests/
   dashboard.cpp         Live ncurses terminal dashboard
   cli.cpp               Interactive CLI — all order types
   simulation.cpp        Multi-threaded producer/consumer, 5M orders
-  test_engine.cpp       18-case matching engine correctness suite
+  test_engine.cpp       20-case matching engine correctness suite
   test_wire_protocol.cpp 20-case wire protocol & parser test suite
-  test_gateway.cpp      23-case TCP kqueue gateway integration test suite
-  test_read_model.cpp   12-case C++ ReadModel and Projector test suite
-  test_api.py           22-case FastAPI and end-to-end integration test suite
+  test_gateway.cpp      28-case TCP kqueue gateway integration test suite
+  test_read_model.cpp   15-case C++ ReadModel and Projector test suite
+  test_api.py           24-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark latency suite with naive baseline
 ```
 
@@ -541,6 +536,7 @@ tests/
 5. **Socket Port Reuse (`SO_REUSEPORT`)**: Enabled `SO_REUSEPORT` alongside `SO_REUSEADDR` to eliminate port binding collisions during rapid test execution.
 6. **Query Trades Frame Stride Alignment**: Fixed a trade record payload calculation in `encode_query_trades_response` where 41-byte struct sizes were packed with a 37-byte offset, restoring exact framing alignment.
 7. **Deterministic Sequence Numbers and FOK Rejection Tracking**: Introduced monotonic 64-bit global sequencing across all outbound execution and order state events, coupled with explicit `OrderStatus::Rejected` events with standardized `RejectCode::InsufficientLiquidityFOK` and `RejectCode::OrderNotFound` codes.
+8. **Thread-Safe Idempotent Lifecycle & Regression Prevention**: Added atomic compare-and-swap lifecycle transitions for `TcpGateway` and `Projector` along with state-regression locks preventing stale out-of-order updates from regressing terminal order states.
 
 ---
 

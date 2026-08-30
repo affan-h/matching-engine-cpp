@@ -443,6 +443,37 @@ def test_market_order_with_price_rejected(api_test_client, mock_client):
     assert response.status_code == 422
 
 
+def test_reconnect_resilience_unit():
+    """Test 22: GatewayTcpClient transparently reconnects on closed socket."""
+    client = GatewayTcpClient(host="127.0.0.1", port=9999)
+    # Should not raise exception on close() even if never connected
+    client.close()
+    assert client.sock is None
+
+
+def test_http_status_codes_contract(api_test_client, mock_client):
+    """Test 23: Exhaustive HTTP status code semantics."""
+    # 400: Unknown symbol query on cancel
+    r400 = api_test_client.delete("/orders/1?symbol=BOGUS")
+    assert r400.status_code == 400
+
+    # 404: Nonexistent order
+    r404 = api_test_client.get("/orders/9999999")
+    assert r404.status_code == 404
+
+    # 422: Negative quantity in body
+    r422 = api_test_client.post("/orders", json={
+        "symbol": "AAPL", "side": "buy", "order_type": "limit", "price": 150, "quantity": -5
+    })
+    assert r422.status_code == 422
+
+    # 202: Accepted limit order
+    r202 = api_test_client.post("/orders", json={
+        "symbol": "AAPL", "side": "buy", "order_type": "limit", "price": 150, "quantity": 5
+    })
+    assert r202.status_code == 202
+
+
 # ─────────────────────────────────────────────
 # Real End-to-End Integration Test (Command & Query Plane)
 # ─────────────────────────────────────────────

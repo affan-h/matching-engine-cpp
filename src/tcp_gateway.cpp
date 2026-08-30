@@ -28,7 +28,8 @@ TcpGateway::~TcpGateway() {
 }
 
 bool TcpGateway::start() {
-    if (is_running.load()) {
+    bool expected = false;
+    if (!is_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return true;
     }
 
@@ -36,6 +37,7 @@ bool TcpGateway::start() {
     listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         std::cerr << "[TcpGateway] socket() failed: " << errno << "\n";
+        is_running.store(false, std::memory_order_release);
         return false;
     }
 
@@ -52,6 +54,7 @@ bool TcpGateway::start() {
         std::cerr << "[TcpGateway] fcntl(O_NONBLOCK) failed\n";
         close(listen_fd);
         listen_fd = -1;
+        is_running.store(false, std::memory_order_release);
         return false;
     }
 
@@ -63,6 +66,7 @@ bool TcpGateway::start() {
         std::cerr << "[TcpGateway] inet_pton failed for host: " << config.host << "\n";
         close(listen_fd);
         listen_fd = -1;
+        is_running.store(false, std::memory_order_release);
         return false;
     }
 
@@ -70,6 +74,7 @@ bool TcpGateway::start() {
         std::cerr << "[TcpGateway] bind() failed on port " << config.port << ": " << errno << "\n";
         close(listen_fd);
         listen_fd = -1;
+        is_running.store(false, std::memory_order_release);
         return false;
     }
 
@@ -87,6 +92,7 @@ bool TcpGateway::start() {
         std::cerr << "[TcpGateway] listen() failed: " << errno << "\n";
         close(listen_fd);
         listen_fd = -1;
+        is_running.store(false, std::memory_order_release);
         return false;
     }
 
@@ -96,6 +102,7 @@ bool TcpGateway::start() {
         std::cerr << "[TcpGateway] kqueue() failed: " << errno << "\n";
         close(listen_fd);
         listen_fd = -1;
+        is_running.store(false, std::memory_order_release);
         return false;
     }
 
@@ -108,10 +115,9 @@ bool TcpGateway::start() {
         close(listen_fd);
         listen_fd = -1;
         kq_fd = -1;
+        is_running.store(false, std::memory_order_release);
         return false;
     }
-
-    is_running.store(true);
 
     // 9. Launch threads: Gateway Event Loop + Engine Consumer
     gateway_thread = std::thread(&TcpGateway::runGateway, this);
@@ -121,11 +127,10 @@ bool TcpGateway::start() {
 }
 
 void TcpGateway::stop() {
-    if (!is_running.load()) {
+    bool expected = true;
+    if (!is_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
         return;
     }
-
-    is_running.store(false);
 
     // Close listen socket and kqueue to unblock kevent()
     if (listen_fd >= 0) {

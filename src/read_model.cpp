@@ -34,7 +34,21 @@ std::string ReadModel::getSymbol(InstrumentId id) const {
 
 void ReadModel::recordOrderInternal(const OrderRecord& record) {
     auto it = orders.find(record.order_id);
-    if (it == orders.end()) {
+    if (it != orders.end()) {
+        // Prevent state regression: ignore stale updates with older sequence
+        if (record.sequence > 0 && it->second.sequence > record.sequence) {
+            return;
+        }
+
+        // Prevent state regression: terminal status (Filled, Cancelled, Rejected) cannot regress
+        if ((it->second.status == events::OrderStatus::Filled ||
+             it->second.status == events::OrderStatus::Cancelled ||
+             it->second.status == events::OrderStatus::Rejected) &&
+            (record.status == events::OrderStatus::New ||
+             record.status == events::OrderStatus::PartiallyFilled)) {
+            return;
+        }
+    } else {
         // Enforce bounded capacity via FIFO eviction
         while (orders.size() >= max_orders && !order_eviction_queue.empty()) {
             OrderId oldest = order_eviction_queue.front();
@@ -42,7 +56,10 @@ void ReadModel::recordOrderInternal(const OrderRecord& record) {
             auto old_it = orders.find(oldest);
             if (old_it != orders.end()) {
                 if (old_it->second.client_order_id != 0) {
-                    client_to_order_id.erase(old_it->second.client_order_id);
+                    auto cl_it = client_to_order_id.find(old_it->second.client_order_id);
+                    if (cl_it != client_to_order_id.end() && cl_it->second == old_it->first) {
+                        client_to_order_id.erase(cl_it);
+                    }
                 }
                 orders.erase(old_it);
             }
@@ -81,7 +98,9 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
     switch (event.type) {
         case events::OutboundEventType::Trade: {
             const auto& p = event.trade;
-            metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+            if (p.sequence > 0) {
+                metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+            }
             metrics.total_trades++;
             metrics.total_volume += p.quantity;
 
@@ -111,7 +130,9 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
 
         case events::OutboundEventType::L2Update: {
             const auto& p = event.l2;
-            metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+            if (p.sequence > 0) {
+                metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+            }
 
             std::string sym = "";
             auto sym_it = id_to_symbol.find(p.instrument_id);
@@ -134,7 +155,9 @@ void ReadModel::applyEvent(const events::OutboundEvent& event) {
 
         case events::OutboundEventType::OrderState: {
             const auto& p = event.order;
-            metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+            if (p.sequence > 0) {
+                metrics.last_sequence = std::max(metrics.last_sequence, p.sequence);
+            }
 
             std::string sym = "";
             auto sym_it = id_to_symbol.find(p.instrument_id);

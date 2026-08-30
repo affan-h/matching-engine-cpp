@@ -186,6 +186,13 @@ OrderId MatchingEngine::addLimitOrder(
     TimeInForce tif,
     uint64_t client_order_id)
 {
+    if (__builtin_expect(price == 0 || qty == 0 || price > 100000, 0)) {
+        OrderId id = generateOrderId();
+        emitOrderState(id, client_order_id, instrument, side, price, qty, 0, 0,
+                       events::OrderStatus::Rejected, events::RejectCode::InvalidPriceQty, getCurrentTime());
+        return id;
+    }
+
     if (__builtin_expect(instrument >= books.size(), 0)) {
         books.resize(instrument + 1);
     }
@@ -312,6 +319,13 @@ OrderId MatchingEngine::addMarketOrder(
     Quantity qty,
     uint64_t client_order_id)
 {
+    if (__builtin_expect(qty == 0, 0)) {
+        OrderId id = generateOrderId();
+        emitOrderState(id, client_order_id, instrument, side, 0, qty, 0, 0,
+                       events::OrderStatus::Rejected, events::RejectCode::InvalidPriceQty, getCurrentTime());
+        return id;
+    }
+
     if (instrument >= books.size()) {
         books.resize(instrument + 1);
     }
