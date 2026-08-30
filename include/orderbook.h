@@ -68,5 +68,11 @@ public:
         std::vector<PriceLevelSnapshot>& asks,
         int depth = 5) const;
 
+    // Fast zero-allocation depth extraction for outbound L2 updates
+    void getDepthFast(
+        PriceLevelRecord* out_bids, uint8_t& bid_count,
+        PriceLevelRecord* out_asks, uint8_t& ask_count,
+        size_t max_depth) const;
+
     void printBook() const;
 };

@@ -61,6 +61,12 @@ struct PriceLevelSnapshot {
     int      orderCount;
 };
 
+// Fixed-size price level representation for zero-allocation snapshots
+struct PriceLevelRecord {
+    Price price{0};
+    Quantity quantity{0};
+};
+
 struct L2Snapshot {
     InstrumentId instrument;
     std::string  symbol;

@@ -35,11 +35,7 @@ enum class RejectCode : uint8_t {
 
 constexpr size_t MAX_L2_DEPTH = 10;
 
-// Fixed-size price level representation for zero-allocation snapshots
-struct PriceLevelRecord {
-    Price price{0};
-    Quantity quantity{0};
-};
+using PriceLevelRecord = ::PriceLevelRecord;
 
 // Execution trade event
 struct TradeEventPayload {

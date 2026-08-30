@@ -72,9 +72,9 @@ public:
 
 static void BM_Naive_Insert(benchmark::State& state) {
     NaiveOrderBook book;
+    uint64_t prev = 0;
     for (auto _ : state) {
         state.PauseTiming();
-        static uint64_t prev = 0;
         if (prev) book.cancel(prev, 0, 100);
         state.ResumeTiming();
         prev = book.insert(0, 100, 10);
@@ -118,10 +118,10 @@ static void BM_InsertOrder(benchmark::State& state) {
         engine.cancelOrder(aapl, id);
     }
 
+    OrderId prev = 0;
     for (auto _ : state) {
         state.PauseTiming();
         // Cancel previous order so pool stays warm and book doesn't grow
-        static OrderId prev = 0;
         if (prev) engine.cancelOrder(aapl, prev);
         state.ResumeTiming();
 

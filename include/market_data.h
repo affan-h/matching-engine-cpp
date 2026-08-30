@@ -17,6 +17,11 @@ public:
         subscribers.push_back(std::move(cb));
     }
 
+    // Check if there are active subscribers
+    bool hasSubscribers() const {
+        return !subscribers.empty();
+    }
+
     // Called by the engine after every order book change
     void publish(const L2Snapshot& snapshot) {
         for (auto& cb : subscribers)

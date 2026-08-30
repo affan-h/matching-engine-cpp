@@ -400,6 +400,38 @@ void OrderBook::getDepth(
     }
 }
 
+void OrderBook::getDepthFast(
+    PriceLevelRecord* out_bids, uint8_t& bid_count,
+    PriceLevelRecord* out_asks, uint8_t& ask_count,
+    size_t max_depth) const
+{
+    bid_count = 0;
+    int p = findNextBid(MAX_PRICE);
+    while (p >= 0 && bid_count < max_depth)
+    {
+        if (bidLevels[p].head != nullptr)
+        {
+            out_bids[bid_count].price = p;
+            out_bids[bid_count].quantity = bidLevels[p].totalVolume;
+            bid_count++;
+        }
+        p = findNextBid(p - 1);
+    }
+
+    ask_count = 0;
+    p = findNextAsk(0);
+    while (p <= MAX_PRICE && ask_count < max_depth)
+    {
+        if (askLevels[p].head != nullptr)
+        {
+            out_asks[ask_count].price = p;
+            out_asks[ask_count].quantity = askLevels[p].totalVolume;
+            ask_count++;
+        }
+        p = findNextAsk(p + 1);
+    }
+}
+
 void OrderBook::printBook() const
 {
     std::cout << "\n----- ORDER BOOK -----\n";

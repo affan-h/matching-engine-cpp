@@ -109,9 +109,12 @@ Trade MatchingEngine::createTrade(
     }
 
     // Notify trade subscribers (e.g. stats tracker)
-    for (auto& cb : tradeSubscribers)
-        cb(instrument, registry.getSymbol(instrument),
-           trade.price, trade.quantity, trade.aggressorSide);
+    if (!tradeSubscribers.empty()) {
+        const std::string& sym = registry.getSymbol(instrument);
+        for (auto& cb : tradeSubscribers)
+            cb(instrument, sym,
+               trade.price, trade.quantity, trade.aggressorSide);
+    }
 
     if (outboundQueue) {
         events::OutboundEvent evt;
@@ -142,16 +145,18 @@ OrderId MatchingEngine::generateOrderId()
 
 void MatchingEngine::publishSnapshot(InstrumentId instrument)
 {
+    if (!feed.hasSubscribers() && !outboundQueue) return;
     if (instrument >= books.size()) return;
 
-    std::vector<PriceLevelSnapshot> bids, asks;
-    books[instrument].getDepth(bids, asks, 10);
-
-    feed.publishSnapshot(
-        instrument,
-        registry.getSymbol(instrument),
-        bids,
-        asks);
+    if (feed.hasSubscribers()) {
+        std::vector<PriceLevelSnapshot> bids, asks;
+        books[instrument].getDepth(bids, asks, 10);
+        feed.publishSnapshot(
+            instrument,
+            registry.getSymbol(instrument),
+            bids,
+            asks);
+    }
 
     if (outboundQueue) {
         events::OutboundEvent evt;
@@ -160,19 +165,10 @@ void MatchingEngine::publishSnapshot(InstrumentId instrument)
         evt.l2.timestamp = getCurrentTime();
         evt.l2.sequence = ++globalSequence;
 
-        size_t b_count = std::min(bids.size(), events::MAX_L2_DEPTH);
-        evt.l2.bid_count = static_cast<uint8_t>(b_count);
-        for (size_t i = 0; i < b_count; ++i) {
-            evt.l2.bids[i].price = bids[i].price;
-            evt.l2.bids[i].quantity = bids[i].volume;
-        }
-
-        size_t a_count = std::min(asks.size(), events::MAX_L2_DEPTH);
-        evt.l2.ask_count = static_cast<uint8_t>(a_count);
-        for (size_t i = 0; i < a_count; ++i) {
-            evt.l2.asks[i].price = asks[i].price;
-            evt.l2.asks[i].quantity = asks[i].volume;
-        }
+        books[instrument].getDepthFast(
+            evt.l2.bids, evt.l2.bid_count,
+            evt.l2.asks, evt.l2.ask_count,
+            events::MAX_L2_DEPTH);
 
         publishOutbound(evt);
     }
@@ -224,10 +220,11 @@ OrderId MatchingEngine::addLimitOrder(
 
     if (side == Side::Buy)
     {
-        while (incoming.quantity > 0 &&
-               book.hasAsks() &&
-               incoming.price >= book.getBestAsk())
+        while (incoming.quantity > 0)
         {
+            Price bestAsk = book.getBestAsk();
+            if (bestAsk > 100000 || incoming.price < bestAsk) break;
+
             Order& best = book.getBestAskOrder();
             Quantity tradeQty = std::min(incoming.quantity, best.quantity);
             Trade trade = createTrade(instrument, incoming, best, tradeQty);
@@ -267,10 +264,11 @@ OrderId MatchingEngine::addLimitOrder(
     }
     else
     {
-        while (incoming.quantity > 0 &&
-               book.hasBids() &&
-               incoming.price <= book.getBestBid())
+        while (incoming.quantity > 0)
         {
+            Price bestBid = book.getBestBid();
+            if (bestBid < 0 || incoming.price > bestBid) break;
+
             Order& best = book.getBestBidOrder();
             Quantity tradeQty = std::min(incoming.quantity, best.quantity);
             Trade trade = createTrade(instrument, incoming, best, tradeQty);
@@ -346,8 +344,11 @@ OrderId MatchingEngine::addMarketOrder(
 
     if (side == Side::Buy)
     {
-        while (incoming.quantity > 0 && book.hasAsks())
+        while (incoming.quantity > 0)
         {
+            Price bestAsk = book.getBestAsk();
+            if (bestAsk > 100000) break;
+
             Order& best = book.getBestAskOrder();
             Quantity tradeQty = std::min(incoming.quantity, best.quantity);
             Trade trade = createTrade(instrument, incoming, best, tradeQty);
@@ -369,8 +370,11 @@ OrderId MatchingEngine::addMarketOrder(
     }
     else
     {
-        while (incoming.quantity > 0 && book.hasBids())
+        while (incoming.quantity > 0)
         {
+            Price bestBid = book.getBestBid();
+            if (bestBid < 0) break;
+
             Order& best = book.getBestBidOrder();
             Quantity tradeQty = std::min(incoming.quantity, best.quantity);
             Trade trade = createTrade(instrument, incoming, best, tradeQty);
@@ -413,17 +417,26 @@ bool MatchingEngine::cancelOrder(
                        events::OrderStatus::Rejected, events::RejectCode::UnknownInstrument, getCurrentTime());
         return false;
     }
-    Order order;
-    bool found = books[instrument].getOrder(id, order);
+
+    if (outboundQueue) {
+        Order order;
+        bool found = books[instrument].getOrder(id, order);
+        bool ok = books[instrument].cancelOrder(id);
+        if (ok) {
+            emitOrderState(id, client_order_id, instrument, found ? order.side : Side::Buy, found ? order.price : 0,
+                           found ? order.quantity : 0, 0, 0,
+                           events::OrderStatus::Cancelled, events::RejectCode::None, getCurrentTime());
+            publishSnapshot(instrument);
+        } else {
+            emitOrderState(id, client_order_id, instrument, Side::Buy, 0, 0, 0, 0,
+                           events::OrderStatus::Rejected, events::RejectCode::OrderNotFound, getCurrentTime());
+        }
+        return ok;
+    }
+
     bool ok = books[instrument].cancelOrder(id);
-    if (ok) {
-        emitOrderState(id, client_order_id, instrument, found ? order.side : Side::Buy, found ? order.price : 0,
-                       found ? order.quantity : 0, 0, 0,
-                       events::OrderStatus::Cancelled, events::RejectCode::None, getCurrentTime());
+    if (ok && feed.hasSubscribers()) {
         publishSnapshot(instrument);
-    } else {
-        emitOrderState(id, client_order_id, instrument, Side::Buy, 0, 0, 0, 0,
-                       events::OrderStatus::Rejected, events::RejectCode::OrderNotFound, getCurrentTime());
     }
     return ok;
 }
