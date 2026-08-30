@@ -10,7 +10,10 @@ Implements the explicit big-endian wire protocol:
     - 0x04 Modify Order     (20 bytes payload)
 """
 
+import sys
+import socket
 import struct
+import time
 from enum import IntEnum
 
 
@@ -78,22 +81,78 @@ def encode_modify_order(
     return struct.pack("!H B I Q I I", payload_len, msg_type, instrument_id, order_id, new_price, new_quantity)
 
 
+class ExchangeClient:
+    """Client for connecting and sending binary orders to the TCP Gateway."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 12345):
+        self.host = host
+        self.port = port
+        self.sock = None
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((self.host, self.port))
+
+    def send_limit_order(self, instrument_id: int, side: Side, price: int, quantity: int, tif: TimeInForce = TimeInForce.GTC):
+        frame = encode_limit_order(instrument_id, side, price, quantity, tif)
+        self.sock.sendall(frame)
+
+    def send_market_order(self, instrument_id: int, side: Side, quantity: int):
+        frame = encode_market_order(instrument_id, side, quantity)
+        self.sock.sendall(frame)
+
+    def send_cancel_order(self, instrument_id: int, order_id: int):
+        frame = encode_cancel_order(instrument_id, order_id)
+        self.sock.sendall(frame)
+
+    def send_modify_order(self, instrument_id: int, order_id: int, new_price: int, new_quantity: int):
+        frame = encode_modify_order(instrument_id, order_id, new_price, new_quantity)
+        self.sock.sendall(frame)
+
+    def close(self):
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+
+
 if __name__ == "__main__":
-    # Self-test encoding
-    limit_frame = encode_limit_order(1, Side.BUY, 100, 10, TimeInForce.GTC)
-    print(f"Limit order frame ({len(limit_frame)} bytes): {limit_frame.hex()}")
-    assert len(limit_frame) == 17
+    if len(sys.argv) > 1 and sys.argv[1] == "--demo":
+        port = int(sys.argv[2]) if len(sys.argv) > 2 else 12345
+        print(f"[Python Client] Connecting to TCP Gateway at 127.0.0.1:{port}...")
+        client = ExchangeClient(port=port)
+        client.connect()
 
-    market_frame = encode_market_order(1, Side.SELL, 5)
-    print(f"Market order frame ({len(market_frame)} bytes): {market_frame.hex()}")
-    assert len(market_frame) == 12
+        print("[Python Client] Sending resting Buy Limit: AAPL (0) @ $150, qty 10...")
+        client.send_limit_order(0, Side.BUY, 150, 10, TimeInForce.GTC)
+        time.sleep(0.1)
 
-    cancel_frame = encode_cancel_order(1, 42)
-    print(f"Cancel order frame ({len(cancel_frame)} bytes): {cancel_frame.hex()}")
-    assert len(cancel_frame) == 15
+        print("[Python Client] Sending matching Sell Limit: AAPL (0) @ $150, qty 10...")
+        client.send_limit_order(0, Side.SELL, 150, 10, TimeInForce.GTC)
+        time.sleep(0.1)
 
-    modify_frame = encode_modify_order(1, 42, 105, 8)
-    print(f"Modify order frame ({len(modify_frame)} bytes): {modify_frame.hex()}")
-    assert len(modify_frame) == 23
+        print("[Python Client] Sending Market Order: INFY (2) SELL, qty 50...")
+        client.send_market_order(2, Side.SELL, 50)
+        time.sleep(0.1)
 
-    print("All python encoder self-tests passed!")
+        print("[Python Client] Closing connection.")
+        client.close()
+        print("[Python Client] Demo completed successfully.")
+    else:
+        # Self-test encoding
+        limit_frame = encode_limit_order(1, Side.BUY, 100, 10, TimeInForce.GTC)
+        print(f"Limit order frame ({len(limit_frame)} bytes): {limit_frame.hex()}")
+        assert len(limit_frame) == 17
+
+        market_frame = encode_market_order(1, Side.SELL, 5)
+        print(f"Market order frame ({len(market_frame)} bytes): {market_frame.hex()}")
+        assert len(market_frame) == 12
+
+        cancel_frame = encode_cancel_order(1, 42)
+        print(f"Cancel order frame ({len(cancel_frame)} bytes): {cancel_frame.hex()}")
+        assert len(cancel_frame) == 15
+
+        modify_frame = encode_modify_order(1, 42, 105, 8)
+        print(f"Modify order frame ({len(modify_frame)} bytes): {modify_frame.hex()}")
+        assert len(modify_frame) == 23
+
+        print("All python encoder self-tests passed!")

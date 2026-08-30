@@ -5,6 +5,8 @@ sim
 test
 test_wire
 test_wire_protocol
+gateway
+test_gateway
 bench
 *.out
 .DS_Store
