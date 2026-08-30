@@ -1,8 +1,9 @@
 build/
 *.o
-engine
-simulation
-benchmark
+cli
+sim
+test
+bench
 *.out
 .DS_Store
 .vscode
