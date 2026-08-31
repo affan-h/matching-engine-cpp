@@ -563,7 +563,7 @@ tests/
   test_engine.cpp       26-case matching engine correctness suite
   test_wire_protocol.cpp 23-case wire protocol & parser test suite
   test_gateway.cpp      42-case TCP kqueue gateway integration test suite
-  test_read_model.cpp   20-case C++ ReadModel and Projector test suite
+  test_read_model.cpp   22-case C++ ReadModel and Projector test suite
   test_api.py           26-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark latency suite with naive baseline
 ```

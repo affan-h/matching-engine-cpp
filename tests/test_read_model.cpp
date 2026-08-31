@@ -711,6 +711,83 @@ TEST(test_read_model_empty_query_determinism) {
     assert(m.registered_symbols_count == 2);
 }
 
+// 21. Multi-Instrument Concurrent Query Stress
+TEST(test_read_model_multi_instrument_concurrent_queries) {
+    ReadModel model(1000, 500);
+    model.registerSymbol(0, "AAPL");
+    model.registerSymbol(1, "RELIANCE");
+    model.registerSymbol(2, "INFY");
+    model.registerSymbol(3, "TATASTEEL");
+
+    std::atomic<bool> stop_flag{false};
+    std::vector<std::thread> readers;
+
+    // 8 reader threads querying different instruments
+    for (int t = 0; t < 8; ++t) {
+        readers.emplace_back([&model, &stop_flag, t]() {
+            InstrumentId inst = static_cast<InstrumentId>(t % 4);
+            while (!stop_flag.load(std::memory_order_relaxed)) {
+                L2BookState book;
+                model.getL2Book(inst, book);
+                assert(book.instrument_id == inst || book.instrument_id == 0);
+
+                std::vector<TradeRecord> trades;
+                model.getRecentTrades(inst, 20, trades);
+                for (const auto& tr : trades) {
+                    assert(tr.instrument_id == inst);
+                }
+                std::this_thread::yield();
+            }
+        });
+    }
+
+    // Writer thread pushing events across instruments
+    for (uint64_t i = 1; i <= 500; ++i) {
+        InstrumentId inst = static_cast<InstrumentId>(i % 4);
+        events::OutboundEvent evt;
+        evt.type = events::OutboundEventType::Trade;
+        evt.trade.trade_id = i;
+        evt.trade.instrument_id = inst;
+        evt.trade.buy_order_id = i * 2;
+        evt.trade.sell_order_id = i * 2 + 1;
+        evt.trade.aggressor_side = Side::Buy;
+        evt.trade.price = static_cast<Price>(100 + (i % 50));
+        evt.trade.quantity = 10;
+        evt.trade.timestamp = 1000 + i;
+        evt.trade.sequence = i;
+        model.applyEvent(evt);
+    }
+
+    stop_flag.store(true, std::memory_order_release);
+    for (auto& th : readers) {
+        th.join();
+    }
+}
+
+// 22. Bounded Trade History Boundary Capacities
+TEST(test_bounded_trade_history_zero_and_boundary_capacities) {
+    BoundedTradeHistory hist(2); // capacity 2
+    assert(hist.getCapacity() == 2);
+    assert(hist.size() == 0);
+
+    TradeRecord t1; t1.trade_id = 1; t1.price = 100;
+    TradeRecord t2; t2.trade_id = 2; t2.price = 101;
+    TradeRecord t3; t3.trade_id = 3; t3.price = 102;
+
+    hist.add(t1);
+    assert(hist.size() == 1);
+    hist.add(t2);
+    assert(hist.size() == 2);
+    hist.add(t3); // overwrites t1
+    assert(hist.size() == 2);
+
+    std::vector<TradeRecord> out;
+    hist.getRecent(10, out);
+    assert(out.size() == 2);
+    assert(out[0].trade_id == 3); // Most recent first
+    assert(out[1].trade_id == 2);
+}
+
 int main() {
     std::cout << "\n===== Read Model & Projector Test Suite =====\n\n";
 
@@ -734,6 +811,8 @@ int main() {
     RUN_TEST(test_projector_shutdown_drain_accounting);
     RUN_TEST(test_read_model_readiness_and_synchronization_state);
     RUN_TEST(test_read_model_empty_query_determinism);
+    RUN_TEST(test_read_model_multi_instrument_concurrent_queries);
+    RUN_TEST(test_bounded_trade_history_zero_and_boundary_capacities);
 
     std::cout << "\n=============================================\n";
     std::cout << "Results: " << passed << " passed, 0 failed\n\n";
