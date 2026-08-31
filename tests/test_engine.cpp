@@ -567,6 +567,54 @@ TEST(test_engine_telemetry_counters) {
 }
 
 // ─────────────────────────────────────────────
+// 25. Extreme Price Boundary Levels
+// ─────────────────────────────────────────────
+TEST(test_extreme_price_boundary_levels) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    // Test at price 1 (minimum price)
+    OrderId b_min = engine.addLimitOrder(inst, Side::Buy, 1, 10, TimeInForce::GTC);
+    ASSERT(b_min > 0, "Price 1 bid accepted");
+
+    // Test at price 100000 (maximum price)
+    OrderId a_max = engine.addLimitOrder(inst, Side::Sell, 100000, 10, TimeInForce::GTC);
+    ASSERT(a_max > 0, "Price 100000 ask accepted");
+
+    // Test at word boundary levels: 63, 64, 127, 128
+    engine.addLimitOrder(inst, Side::Buy, 63, 5, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Buy, 64, 5, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Sell, 127, 5, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Sell, 128, 5, TimeInForce::GTC);
+
+    // Cancel min and max
+    ASSERT(engine.cancelOrder(inst, b_min), "Cancel price 1 succeeded");
+    ASSERT(engine.cancelOrder(inst, a_max), "Cancel price 100000 succeeded");
+}
+
+// ─────────────────────────────────────────────
+// 26. FOK Exact Multi-Level Boundary Accounting
+// ─────────────────────────────────────────────
+TEST(test_fok_exact_multi_level_boundary_accounting) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+
+    // Populate asks: 10 @ 101, 10 @ 102, 10 @ 103 (total 30 available up to price 103)
+    engine.addLimitOrder(inst, Side::Sell, 101, 10, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Sell, 102, 10, TimeInForce::GTC);
+    engine.addLimitOrder(inst, Side::Sell, 103, 10, TimeInForce::GTC);
+
+    // 1. FOK Buy 31 @ 103 -> insufficient liquidity (only 30 available) -> rejected with 0 trades
+    uint64_t before_trades = engine.getTotalTrades();
+    engine.addLimitOrder(inst, Side::Buy, 103, 31, TimeInForce::FOK);
+    ASSERT(engine.getTotalTrades() == before_trades, "FOK 31 rejected with 0 trades");
+
+    // 2. FOK Buy 30 @ 103 -> exact liquidity -> completely fills across all 3 levels
+    engine.addLimitOrder(inst, Side::Buy, 103, 30, TimeInForce::FOK);
+    ASSERT(engine.getTotalTrades() == before_trades + 3, "FOK 30 fully executed across 3 levels");
+}
+
+// ─────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────
 int main() {
@@ -596,6 +644,8 @@ int main() {
     RUN(test_modify_invalid_price_qty_preserves_resting_order);
     RUN(test_order_lifecycle_rapid_churn);
     RUN(test_engine_telemetry_counters);
+    RUN(test_extreme_price_boundary_levels);
+    RUN(test_fok_exact_multi_level_boundary_accounting);
 
     std::cout << "\n======================================\n";
     std::cout << "Results: " << passed << " passed, "

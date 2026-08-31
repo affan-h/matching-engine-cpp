@@ -4,6 +4,7 @@
 #include <vector>
 #include "wire_protocol.h"
 #include "tcp_parser.h"
+#include "spsc_queue.h"
 
 // ─────────────────────────────────────────────
 // Test Harness Helpers
@@ -574,6 +575,102 @@ TEST(test_adversarial_fuzzed_wire_frames) {
 }
 
 // ─────────────────────────────────────────────
+// 22. Adversarial SPSC Queue Capacities
+// ─────────────────────────────────────────────
+TEST(test_spsc_queue_adversarial_capacities) {
+    // 1. Boundary capacity 0 and 1 -> clamped to 2
+    {
+        LockFreeSPSCQueue<int> q0(0);
+        ASSERT(q0.getCapacity() == 2, "Capacity 0 clamped to 2");
+        ASSERT(q0.empty(), "Empty at start");
+        ASSERT(q0.push(10), "Push 10 succeeds");
+        ASSERT(!q0.push(20), "Queue full (capacity 2 has 1 usable slot)");
+        int val = 0;
+        ASSERT(q0.pop(val) && val == 10, "Pop 10");
+        ASSERT(q0.empty(), "Empty after pop");
+    }
+
+    // 2. Non-power-of-two capacities (3, 7, 100)
+    {
+        LockFreeSPSCQueue<int> q(7);
+        ASSERT(q.getCapacity() == 7, "Capacity 7");
+        for (int i = 1; i <= 6; ++i) {
+            ASSERT(q.push(i), "Push item");
+        }
+        ASSERT(!q.push(7), "Queue full at 6 items");
+
+        for (int i = 1; i <= 6; ++i) {
+            int out = 0;
+            ASSERT(q.pop(out) && out == i, "FIFO order preserved");
+        }
+        ASSERT(q.empty(), "Queue empty");
+    }
+}
+
+// ─────────────────────────────────────────────
+// 23. Query Response Round Trips (All Types)
+// ─────────────────────────────────────────────
+TEST(test_wire_protocol_all_query_response_round_trips) {
+    // 1. QueryBookResponse
+    {
+        L2BookState book;
+        book.instrument_id = 1;
+        book.sequence = 42;
+        book.timestamp = 123456789;
+        book.bid_count = 2;
+        book.ask_count = 1;
+        book.bids[0] = {150, 10};
+        book.bids[1] = {149, 20};
+        book.asks[0] = {155, 30};
+
+        auto frame = wire::encode_query_book_response(book);
+        ASSERT(frame[2] == static_cast<uint8_t>(wire::MessageType::QueryBookResponse), "Correct type");
+        ASSERT(wire::read_u32_be(&frame[3]) == 1, "Instrument 1");
+        ASSERT(wire::read_u64_be(&frame[7]) == 42, "Sequence 42");
+    }
+
+    // 2. QueryOrderResponse
+    {
+        OrderRecord rec;
+        rec.order_id = 999;
+        rec.client_order_id = 888;
+        rec.instrument_id = 0;
+        rec.side = Side::Buy;
+        rec.price = 150;
+        rec.original_qty = 10;
+        rec.remaining_qty = 0;
+        rec.filled_qty = 10;
+        rec.status = events::OrderStatus::Filled;
+        rec.reject_code = events::RejectCode::None;
+        rec.timestamp = 123456;
+        rec.sequence = 10;
+
+        auto frame = wire::encode_query_order_response(true, rec);
+        ASSERT(frame[2] == static_cast<uint8_t>(wire::MessageType::QueryOrderResponse), "Correct type");
+        ASSERT(frame[3] == 0x01, "Found = 1");
+        ASSERT(wire::read_u64_be(&frame[4]) == 999, "Order ID matches");
+    }
+
+    // 3. QueryStatsResponse
+    {
+        EngineMetrics m;
+        m.total_trades = 100;
+        m.total_volume = 500;
+        m.total_orders_accepted = 200;
+        m.total_orders_filled = 100;
+        m.total_orders_cancelled = 50;
+        m.total_orders_rejected = 10;
+        m.last_sequence = 300;
+        m.tracked_orders_count = 50;
+        m.registered_symbols_count = 4;
+
+        auto frame = wire::encode_query_stats_response(m);
+        ASSERT(frame[2] == static_cast<uint8_t>(wire::MessageType::QueryStatsResponse), "Correct type");
+        ASSERT(wire::read_u64_be(&frame[3]) == 100, "Trades 100");
+    }
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -600,6 +697,8 @@ int main() {
     RUN(test_ping_pong_frame_parsing);
     RUN(test_query_stats_frame_parsing);
     RUN(test_adversarial_fuzzed_wire_frames);
+    RUN(test_spsc_queue_adversarial_capacities);
+    RUN(test_wire_protocol_all_query_response_round_trips);
 
     std::cout << "\n=================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

@@ -42,6 +42,9 @@ inline bool OrderBook::testBit(const std::vector<uint64_t>& bitmap, int price) c
 
 inline int OrderBook::findNextAsk(int fromPrice) const
 {
+    if (__builtin_expect(fromPrice > MAX_PRICE, 0)) return MAX_PRICE + 1;
+    if (__builtin_expect(fromPrice < 0, 0)) fromPrice = 0;
+
     int word = fromPrice / 64;
     int bit  = fromPrice % 64;
 
@@ -69,6 +72,9 @@ inline int OrderBook::findNextAsk(int fromPrice) const
 
 inline int OrderBook::findNextBid(int fromPrice) const
 {
+    if (__builtin_expect(fromPrice < 0, 0)) return -1;
+    if (__builtin_expect(fromPrice > MAX_PRICE, 0)) fromPrice = MAX_PRICE;
+
     int word = fromPrice / 64;
     int bit  = fromPrice % 64;
 
