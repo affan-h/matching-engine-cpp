@@ -14,6 +14,7 @@
 #include "spsc_queue.h"
 #include "wire_protocol.h"
 #include "tcp_gateway.h"
+#include "projector.h"
 
 // ─────────────────────────────────────────────
 // Test Harness Helpers
@@ -1393,6 +1394,263 @@ TEST(test_gateway_connection_saturation_and_recovery) {
 }
 
 // ─────────────────────────────────────────────
+// 39. Sustained Backpressure and Drain Under High Throughput
+// ─────────────────────────────────────────────
+TEST(test_gateway_sustained_backpressure_and_drain_under_high_throughput) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    InstrumentId rel  = engine.registerInstrument("RELIANCE");
+    ReadModel read_model(10000, 10000);
+    read_model.registerSymbol(aapl, "AAPL");
+    read_model.registerSymbol(rel, "RELIANCE");
+
+    OutboundEventQueue outbound_queue(65536);
+    engine.setOutboundQueue(&outbound_queue);
+
+    Projector projector(outbound_queue, read_model);
+    projector.start();
+
+    SPSCQueue command_queue(65536);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, command_queue, config, &read_model);
+    gateway.start();
+
+    constexpr int NUM_CLIENTS = 8;
+    constexpr int ORDERS_PER_CLIENT = 200;
+    std::vector<std::thread> workers;
+
+    for (int c = 0; c < NUM_CLIENTS; ++c) {
+        workers.emplace_back([&gateway, aapl, rel, c]() {
+            int client = connect_client(gateway.getBoundPort());
+            if (client < 0) return;
+
+            for (int i = 0; i < ORDERS_PER_CLIENT; ++i) {
+                uint64_t cl_id = static_cast<uint64_t>(c * 10000 + i + 1);
+                InstrumentId inst = (i % 2 == 0) ? aapl : rel;
+                Price px = 100 + (i % 20);
+                auto frame = wire::encode_limit_order(inst, (i % 4 < 2) ? Side::Buy : Side::Sell, px, 5, TimeInForce::GTC, cl_id);
+                send_all(client, frame);
+            }
+            close(client);
+        });
+    }
+
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    // Wait until all commands are processed through the engine and projector
+    while (gateway.getStats().events_processed.load() < static_cast<uint64_t>(NUM_CLIENTS * ORDERS_PER_CLIENT)) {
+        std::this_thread::yield();
+    }
+
+    gateway.stop();
+    projector.stop();
+
+    ASSERT(gateway.getStats().events_processed.load() == static_cast<uint64_t>(NUM_CLIENTS * ORDERS_PER_CLIENT), "All client events processed");
+    ASSERT(read_model.getLastSequence() > 0, "ReadModel sequence advanced");
+}
+
+// ─────────────────────────────────────────────
+// 40. Adversarial Parser Fuzzing and Recovery
+// ─────────────────────────────────────────────
+TEST(test_gateway_adversarial_parser_fuzzing_and_recovery) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    // Adversarial payloads: invalid types, oversized lengths, bad prices/quantities, truncated buffers
+    std::vector<std::vector<uint8_t>> hostile_payloads = {
+        {0x00, 0xFF, 0x01},                         // Claim 255 bytes payload (> MAX_PAYLOAD_LENGTH 128)
+        {0x00, 0x05, 0x99, 0x01, 0x02, 0x03, 0x04}, // Unknown message type 0x99
+        {0x00, 0x16, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x0A, 0x00}, // Invalid side 5
+        {0x00, 0x16, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00}, // Invalid price 0
+        {0x00, 0x16, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00}, // Invalid quantity 0
+        {0x00, 0x16, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x0A, 0x09}, // Invalid TIF 9
+    };
+
+    for (const auto& hostile : hostile_payloads) {
+        int client = connect_client(gateway.getBoundPort());
+        ASSERT(client >= 0, "Attacker client connects");
+        send_all(client, hostile);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        close(client);
+    }
+
+    ASSERT(gateway.getStats().malformed_frames.load() >= hostile_payloads.size(), "All hostile frames flagged");
+
+    // Legitimate client connects and performs normal operations cleanly
+    int good_client = connect_client(gateway.getBoundPort());
+    ASSERT(good_client >= 0, "Good client connects cleanly");
+
+    auto ping = wire::encode_ping(8888);
+    send_all(good_client, ping);
+    auto [type, payload] = recv_response(good_client);
+    ASSERT(type == wire::MessageType::Pong, "Good client receives Pong");
+    ASSERT(wire::read_u64_be(payload.data()) == 8888, "Good client nonce matches");
+
+    close(good_client);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 41. Large Burst Concurrent Queries and Commands
+// ─────────────────────────────────────────────
+TEST(test_gateway_large_burst_concurrent_queries_and_commands) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(1000, 1000);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    OutboundEventQueue outbound_queue(4096);
+    engine.setOutboundQueue(&outbound_queue);
+
+    Projector projector(outbound_queue, read_model);
+    projector.start();
+
+    SPSCQueue command_queue(4096);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, command_queue, config, &read_model);
+    gateway.start();
+
+    constexpr int NUM_QUERY_THREADS = 6;
+    constexpr int NUM_ORDER_THREADS = 6;
+    constexpr int OPS_PER_THREAD = 100;
+
+    std::vector<std::thread> threads;
+
+    // Launch query threads
+    for (int t = 0; t < NUM_QUERY_THREADS; ++t) {
+        threads.emplace_back([&gateway, aapl]() {
+            int client = connect_client(gateway.getBoundPort());
+            if (client < 0) return;
+
+            for (int i = 0; i < OPS_PER_THREAD; ++i) {
+                if (i % 3 == 0) {
+                    auto req = wire::encode_query_book(aapl);
+                    send_all(client, req);
+                    recv_response(client);
+                } else if (i % 3 == 1) {
+                    auto req = wire::encode_query_trades(aapl, 10);
+                    send_all(client, req);
+                    recv_response(client);
+                } else {
+                    auto req = wire::encode_query_stats();
+                    send_all(client, req);
+                    recv_response(client);
+                }
+            }
+            close(client);
+        });
+    }
+
+    // Launch order command threads
+    for (int t = 0; t < NUM_ORDER_THREADS; ++t) {
+        threads.emplace_back([&gateway, aapl, t]() {
+            int client = connect_client(gateway.getBoundPort());
+            if (client < 0) return;
+
+            for (int i = 0; i < OPS_PER_THREAD; ++i) {
+                uint64_t cl_id = static_cast<uint64_t>(t * 1000 + i + 1);
+                auto frame = wire::encode_limit_order(aapl, (i % 2 == 0) ? Side::Buy : Side::Sell, 150, 1, TimeInForce::GTC, cl_id);
+                send_all(client, frame);
+            }
+            close(client);
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    // Drain
+    while (gateway.getStats().events_processed.load() < static_cast<uint64_t>(NUM_ORDER_THREADS * OPS_PER_THREAD)) {
+        std::this_thread::yield();
+    }
+
+    gateway.stop();
+    projector.stop();
+
+    ASSERT(gateway.getStats().queries_processed.load() >= static_cast<uint64_t>(NUM_QUERY_THREADS * OPS_PER_THREAD), "All queries completed");
+    ASSERT(gateway.getStats().events_processed.load() == static_cast<uint64_t>(NUM_ORDER_THREADS * OPS_PER_THREAD), "All commands completed");
+}
+
+// ─────────────────────────────────────────────
+// 42. Clean Graceful Shutdown Under Intense Traffic Burst
+// ─────────────────────────────────────────────
+TEST(test_gateway_clean_graceful_shutdown_under_intense_traffic_burst) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(10000, 10000);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    OutboundEventQueue outbound_queue(16384);
+    engine.setOutboundQueue(&outbound_queue);
+
+    Projector projector(outbound_queue, read_model);
+    projector.start();
+
+    SPSCQueue command_queue(16384);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, command_queue, config, &read_model);
+    gateway.start();
+
+    std::atomic<bool> stop_traffic{false};
+    constexpr int NUM_THREADS = 6;
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&gateway, aapl, &stop_traffic, t]() {
+            int client = connect_client(gateway.getBoundPort());
+            if (client < 0) return;
+
+            uint64_t count = 0;
+            while (!stop_traffic.load(std::memory_order_relaxed)) {
+                Side side = (count % 2 == 0) ? Side::Buy : Side::Sell;
+                auto frame = wire::encode_limit_order(aapl, side, 150, 1, TimeInForce::GTC, t * 100000ULL + (++count));
+                try {
+                    send_all(client, frame);
+                } catch (...) {
+                    break;
+                }
+            }
+            close(client);
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Shutdown gateway while clients are actively sending
+    gateway.stop();
+    stop_traffic.store(true, std::memory_order_relaxed);
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    projector.stop();
+
+    // Verify all pushed events were completely processed during drain
+    ASSERT(gateway.getStats().events_pushed.load() == gateway.getStats().events_processed.load(), "All pushed events drained into engine");
+    ASSERT(!gateway.isRunning(), "Gateway is stopped");
+    ASSERT(!projector.isRunning(), "Projector is stopped");
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -1437,6 +1695,10 @@ int main() {
     RUN(test_gateway_malformed_traffic_followed_by_clean_reconnect);
     RUN(test_gateway_liveness_and_worker_health_semantics);
     RUN(test_gateway_connection_saturation_and_recovery);
+    RUN(test_gateway_sustained_backpressure_and_drain_under_high_throughput);
+    RUN(test_gateway_adversarial_parser_fuzzing_and_recovery);
+    RUN(test_gateway_large_burst_concurrent_queries_and_commands);
+    RUN(test_gateway_clean_graceful_shutdown_under_intense_traffic_burst);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

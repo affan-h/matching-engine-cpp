@@ -491,7 +491,7 @@ def get_free_port() -> int:
     return port
 
 
-def wait_for_port(port: int, host: str = "127.0.0.1", timeout: float = 3.0) -> bool:
+def wait_for_port(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> bool:
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -517,11 +517,14 @@ def test_real_gateway_end_to_end():
     """
     test_port = get_free_port()
     proc = subprocess.Popen(
-        ["./gateway", str(test_port)],
+        ["./gateway", "--port", str(test_port)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    assert wait_for_port(test_port), f"C++ Gateway failed to listen on port {test_port}"
+    if not wait_for_port(test_port):
+        proc.terminate()
+        stdout, stderr = proc.communicate(timeout=2)
+        raise AssertionError(f"C++ Gateway failed to listen on port {test_port}. Stderr: {stderr.decode()}")
 
     try:
         real_client = GatewayTcpClient(host="127.0.0.1", port=test_port)

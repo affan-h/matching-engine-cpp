@@ -178,13 +178,19 @@ void TcpGateway::closeClient(int fd) {
 
 static bool send_all_socket(int fd, const uint8_t* data, size_t size) {
     size_t total_sent = 0;
+    int retries = 0;
+    constexpr int MAX_SEND_RETRIES = 10000;
     while (total_sent < size) {
         ssize_t n = send(fd, data + total_sent, size - total_sent, 0);
         if (n > 0) {
             total_sent += static_cast<size_t>(n);
+            retries = 0;
         } else if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (++retries > MAX_SEND_RETRIES) {
+                    return false;
+                }
                 std::this_thread::yield();
                 continue;
             }

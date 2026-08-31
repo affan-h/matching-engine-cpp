@@ -562,7 +562,7 @@ tests/
   simulation.cpp        Multi-threaded producer/consumer, 5M orders
   test_engine.cpp       24-case matching engine correctness suite
   test_wire_protocol.cpp 21-case wire protocol & parser test suite
-  test_gateway.cpp      38-case TCP kqueue gateway integration test suite
+  test_gateway.cpp      42-case TCP kqueue gateway integration test suite
   test_read_model.cpp   20-case C++ ReadModel and Projector test suite
   test_api.py           26-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark latency suite with naive baseline
@@ -612,6 +612,7 @@ tests/
 14. **Matching Engine Hot-Path Optimization & Zero-Allocation Depth Extraction**: Streamlined `publishSnapshot` and `cancelOrder` by guarding snapshot generation when no feed subscribers or outbound queues are attached; added `OrderBook::getDepthFast` to eliminate heap vector allocations and linear linked-list node counting during L2 updates; eliminated redundant bitmap lookups in matching loops.
 15. **Production Observability, Health & Readiness Semantics, and Config Validation**: Added non-blocking telemetry counters across `MatchingEngine` (accepted/rejected/cancelled counts, traded volume, coalesced drops, critical event retries), `TcpGateway` (connections accepted/closed/rejected, queue drops, overflows), and `Projector` (shutdown drain count); added strict CLI/env configuration bounds validation; enriched `/health` endpoint with active RTT measurements, readiness state, and read model health.
 16. **Durability Boundaries, Crash-Consistency & Recovery Hardening**: Hardened worker thread exception boundaries in `TcpGateway` and `Projector`; introduced `worker_fault` and `isHealthy()` lifecycle status; verified empty-state query determinism across `ReadModel`; hardened connection pool recovery and malformed traffic reconnects.
+17. **Bounded TCP Write Retries & Adversarial Stress Hardening**: Added bounded retry loops in `send_all_socket` preventing hung client connections from spinning indefinitely on `EAGAIN`; added comprehensive tests for multi-client concurrent queries/commands, hostile fuzzing, and clean shutdown under high-throughput order bursts.
 
 ---
 
