@@ -678,3 +678,86 @@ def test_reconnect_during_gateway_restart(api_test_client, mock_client):
         "client_order_id": 9003
     })
     assert r3.status_code == 202
+
+
+def test_real_gateway_multi_fill_client_order_id_tracking():
+    """Test 27: Multi-fill cumulative quantity and client_order_id preservation over real gateway."""
+    test_port = get_free_port()
+    proc = subprocess.Popen(
+        ["./gateway", "--port", str(test_port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if not wait_for_port(test_port):
+        proc.terminate()
+        stdout, stderr = proc.communicate(timeout=2)
+        raise AssertionError(f"C++ Gateway failed to listen on port {test_port}. Stderr: {stderr.decode()}")
+
+    try:
+        real_client = GatewayTcpClient(host="127.0.0.1", port=test_port)
+        app.dependency_overrides[get_gateway_client] = lambda: real_client
+        http_client = TestClient(app)
+
+        # 1. Place resting Buy 100 @ 150 with client_order_id 9101
+        r1 = http_client.post("/orders", json={
+            "symbol": "AAPL",
+            "side": "buy",
+            "order_type": "limit",
+            "price": 150,
+            "quantity": 100,
+            "time_in_force": "GTC",
+            "client_order_id": 9101
+        })
+        assert r1.status_code == 202
+
+        time.sleep(0.1)
+
+        # 2. Match first partial fill 30 shares
+        r2 = http_client.post("/orders", json={
+            "symbol": "AAPL",
+            "side": "sell",
+            "order_type": "limit",
+            "price": 150,
+            "quantity": 30,
+            "time_in_force": "GTC",
+            "client_order_id": 9102
+        })
+        assert r2.status_code == 202
+
+        time.sleep(0.1)
+
+        # 3. Query order by client_order_id 9101 -> PARTIALLY_FILLED, filled=30, remaining=70, orig=100
+        o_partial = http_client.get("/orders/9101?by_client_id=true").json()
+        assert o_partial["client_order_id"] == 9101
+        assert o_partial["status"] == "PARTIALLY_FILLED"
+        assert o_partial["original_quantity"] == 100
+        assert o_partial["remaining_quantity"] == 70
+        assert o_partial["filled_quantity"] == 30
+
+        # 4. Match remaining 70 shares
+        r3 = http_client.post("/orders", json={
+            "symbol": "AAPL",
+            "side": "sell",
+            "order_type": "limit",
+            "price": 150,
+            "quantity": 70,
+            "time_in_force": "GTC",
+            "client_order_id": 9103
+        })
+        assert r3.status_code == 202
+
+        time.sleep(0.1)
+
+        # 5. Query order by client_order_id 9101 -> FILLED, filled=100, remaining=0, orig=100
+        o_filled = http_client.get("/orders/9101?by_client_id=true").json()
+        assert o_filled["client_order_id"] == 9101
+        assert o_filled["status"] == "FILLED"
+        assert o_filled["original_quantity"] == 100
+        assert o_filled["remaining_quantity"] == 0
+        assert o_filled["filled_quantity"] == 100
+
+    finally:
+        app.dependency_overrides.clear()
+        real_client.close()
+        proc.terminate()
+        proc.wait(timeout=2)

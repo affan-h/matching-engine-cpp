@@ -788,6 +788,101 @@ TEST(test_bounded_trade_history_zero_and_boundary_capacities) {
     assert(out[1].trade_id == 2);
 }
 
+// 23. Multi-Fill Cumulative Quantity and Client Order ID Preservation
+TEST(test_read_model_multi_fill_cumulative_quantity_and_client_order_id_preservation) {
+    ReadModel model(100, 100);
+    model.registerSymbol(0, "AAPL");
+
+    // 1. New Order #777 with client_order_id 8888 and original_qty 100
+    events::OutboundEvent e1;
+    e1.type = events::OutboundEventType::OrderState;
+    e1.order.order_id = 777;
+    e1.order.client_order_id = 8888;
+    e1.order.instrument_id = 0;
+    e1.order.side = Side::Buy;
+    e1.order.price = 150;
+    e1.order.original_qty = 100;
+    e1.order.remaining_qty = 100;
+    e1.order.filled_qty = 0;
+    e1.order.status = events::OrderStatus::New;
+    e1.order.sequence = 1;
+    model.applyEvent(e1);
+
+    OrderRecord rec;
+    assert(model.getOrderByClientId(8888, rec));
+    assert(rec.order_id == 777);
+    assert(rec.original_qty == 100);
+    assert(rec.remaining_qty == 100);
+    assert(rec.filled_qty == 0);
+    assert(rec.status == events::OrderStatus::New);
+
+    // 2. First partial fill: 30 shares matched (rem = 70)
+    events::OutboundEvent e2;
+    e2.type = events::OutboundEventType::OrderState;
+    e2.order.order_id = 777;
+    e2.order.client_order_id = 0; // resting order fill event
+    e2.order.instrument_id = 0;
+    e2.order.side = Side::Buy;
+    e2.order.price = 150;
+    e2.order.original_qty = 100;
+    e2.order.remaining_qty = 70;
+    e2.order.filled_qty = 30;
+    e2.order.status = events::OrderStatus::PartiallyFilled;
+    e2.order.sequence = 2;
+    model.applyEvent(e2);
+
+    assert(model.getOrderByClientId(8888, rec));
+    assert(rec.client_order_id == 8888);
+    assert(rec.original_qty == 100);
+    assert(rec.remaining_qty == 70);
+    assert(rec.filled_qty == 30);
+    assert(rec.status == events::OrderStatus::PartiallyFilled);
+
+    // 3. Second partial fill: 50 shares matched (rem = 20)
+    events::OutboundEvent e3;
+    e3.type = events::OutboundEventType::OrderState;
+    e3.order.order_id = 777;
+    e3.order.client_order_id = 0;
+    e3.order.instrument_id = 0;
+    e3.order.side = Side::Buy;
+    e3.order.price = 150;
+    e3.order.original_qty = 70;
+    e3.order.remaining_qty = 20;
+    e3.order.filled_qty = 50;
+    e3.order.status = events::OrderStatus::PartiallyFilled;
+    e3.order.sequence = 3;
+    model.applyEvent(e3);
+
+    assert(model.getOrderByClientId(8888, rec));
+    assert(rec.client_order_id == 8888);
+    assert(rec.original_qty == 100);
+    assert(rec.remaining_qty == 20);
+    assert(rec.filled_qty == 80); // cumulative: 100 - 20 = 80
+    assert(rec.status == events::OrderStatus::PartiallyFilled);
+
+    // 4. Final fill: remaining 20 shares matched (rem = 0, status = Filled)
+    events::OutboundEvent e4;
+    e4.type = events::OutboundEventType::OrderState;
+    e4.order.order_id = 777;
+    e4.order.client_order_id = 0;
+    e4.order.instrument_id = 0;
+    e4.order.side = Side::Buy;
+    e4.order.price = 150;
+    e4.order.original_qty = 20;
+    e4.order.remaining_qty = 0;
+    e4.order.filled_qty = 20;
+    e4.order.status = events::OrderStatus::Filled;
+    e4.order.sequence = 4;
+    model.applyEvent(e4);
+
+    assert(model.getOrderByClientId(8888, rec));
+    assert(rec.client_order_id == 8888);
+    assert(rec.original_qty == 100);
+    assert(rec.remaining_qty == 0);
+    assert(rec.filled_qty == 100); // cumulative: 100
+    assert(rec.status == events::OrderStatus::Filled);
+}
+
 int main() {
     std::cout << "\n===== Read Model & Projector Test Suite =====\n\n";
 
@@ -813,6 +908,7 @@ int main() {
     RUN_TEST(test_read_model_empty_query_determinism);
     RUN_TEST(test_read_model_multi_instrument_concurrent_queries);
     RUN_TEST(test_bounded_trade_history_zero_and_boundary_capacities);
+    RUN_TEST(test_read_model_multi_fill_cumulative_quantity_and_client_order_id_preservation);
 
     std::cout << "\n=============================================\n";
     std::cout << "Results: " << passed << " passed, 0 failed\n\n";

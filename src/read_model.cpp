@@ -34,6 +34,7 @@ std::string ReadModel::getSymbol(InstrumentId id) const {
 }
 
 void ReadModel::recordOrderInternal(const OrderRecord& record) {
+    OrderRecord updated = record;
     auto it = orders.find(record.order_id);
     if (it != orders.end()) {
         // Prevent state regression: ignore stale updates with older sequence
@@ -48,6 +49,29 @@ void ReadModel::recordOrderInternal(const OrderRecord& record) {
             (record.status == events::OrderStatus::New ||
              record.status == events::OrderStatus::PartiallyFilled)) {
             return;
+        }
+
+        // Prevent duplicate counting on terminal transitions
+        if (it->second.status == record.status &&
+            (record.status == events::OrderStatus::Filled ||
+             record.status == events::OrderStatus::Cancelled ||
+             record.status == events::OrderStatus::Rejected)) {
+            return;
+        }
+
+        // Preserve client_order_id across fills if not present in this event
+        if (updated.client_order_id == 0 && it->second.client_order_id != 0) {
+            updated.client_order_id = it->second.client_order_id;
+        }
+
+        // Preserve original_qty across subsequent partial fills
+        if (it->second.original_qty > 0) {
+            updated.original_qty = it->second.original_qty;
+        }
+
+        // Compute exact cumulative filled_qty: original_qty - remaining_qty
+        if (updated.original_qty >= updated.remaining_qty) {
+            updated.filled_qty = updated.original_qty - updated.remaining_qty;
         }
     } else {
         // Enforce bounded capacity via FIFO eviction
@@ -65,17 +89,19 @@ void ReadModel::recordOrderInternal(const OrderRecord& record) {
                 orders.erase(old_it);
             }
         }
-        order_eviction_queue.push_back(record.order_id);
+        order_eviction_queue.push_back(updated.order_id);
     }
 
-    if (record.client_order_id != 0) {
-        client_to_order_id[record.client_order_id] = record.order_id;
+    if (updated.client_order_id != 0) {
+        client_to_order_id[updated.client_order_id] = updated.order_id;
     }
 
     // Update aggregate status metrics
-    switch (record.status) {
+    switch (updated.status) {
         case events::OrderStatus::New:
-            metrics.total_orders_accepted++;
+            if (it == orders.end()) {
+                metrics.total_orders_accepted++;
+            }
             break;
         case events::OrderStatus::Filled:
             metrics.total_orders_filled++;
@@ -90,7 +116,7 @@ void ReadModel::recordOrderInternal(const OrderRecord& record) {
             break;
     }
 
-    orders[record.order_id] = record;
+    orders[updated.order_id] = updated;
 }
 
 void ReadModel::applyEvent(const events::OutboundEvent& event) {

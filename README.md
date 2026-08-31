@@ -563,8 +563,8 @@ tests/
   test_engine.cpp       26-case matching engine correctness suite
   test_wire_protocol.cpp 23-case wire protocol & parser test suite
   test_gateway.cpp      42-case TCP kqueue gateway integration test suite
-  test_read_model.cpp   22-case C++ ReadModel and Projector test suite
-  test_api.py           26-case FastAPI and end-to-end integration test suite
+  test_read_model.cpp   23-case C++ ReadModel and Projector test suite
+  test_api.py           27-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark latency suite with naive baseline
 ```
 
@@ -614,6 +614,7 @@ tests/
 16. **Durability Boundaries, Crash-Consistency & Recovery Hardening**: Hardened worker thread exception boundaries in `TcpGateway` and `Projector`; introduced `worker_fault` and `isHealthy()` lifecycle status; verified empty-state query determinism across `ReadModel`; hardened connection pool recovery and malformed traffic reconnects.
 17. **Bounded TCP Write Retries & Adversarial Stress Hardening**: Added bounded retry loops in `send_all_socket` preventing hung client connections from spinning indefinitely on `EAGAIN`; added comprehensive tests for multi-client concurrent queries/commands, hostile fuzzing, and clean shutdown under high-throughput order bursts.
 18. **OrderBook Price Boundary Guards & SPSC Adversarial Verification**: Added explicit boundary clamps to `findNextAsk` (`0..MAX_PRICE`) and `findNextBid` (`-1..MAX_PRICE`) preventing negative indexing on edge checks; added adversarial SPSC queue tests verifying bounded capacity clamps (`< 2 -> 2`), exact fill detection, and circular FIFO ordering.
+19. **ReadModel Multi-Fill Cumulative Quantity & Client Order ID Preservation**: Fixed order tracking in `recordOrderInternal` where subsequent partial fill events on resting orders previously wiped `client_order_id` to 0 and replaced `original_qty` with the intermediate resting volume; now preserves original quantity and client correlation IDs while accurately calculating cumulative `filled_qty` across multi-stage fills.
 
 ---
 
