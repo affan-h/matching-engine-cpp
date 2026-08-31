@@ -84,6 +84,7 @@ private:
     int bound_port = 0;
 
     std::atomic<bool>   is_running{false};
+    std::atomic<bool>   worker_fault{false};
     std::atomic<size_t> active_clients{0};
     std::thread         gateway_thread;
     std::thread         consumer_thread;
@@ -118,6 +119,7 @@ public:
 
     // Accessors
     bool isRunning() const { return is_running.load(); }
+    bool isHealthy() const { return is_running.load() && !worker_fault.load(); }
     int getBoundPort() const { return bound_port; }
     size_t getClientCount() const { return active_clients.load(std::memory_order_relaxed); }
     const GatewayStats& getStats() const { return stats; }

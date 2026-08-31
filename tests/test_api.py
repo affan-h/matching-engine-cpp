@@ -633,3 +633,45 @@ def test_health_readiness_and_diagnostics(api_test_client, mock_client):
     assert data["read_model"]["active"] is True
     assert data["read_model"]["registered_symbols"] == 4
     assert "AAPL" in data["symbols"]
+
+
+def test_reconnect_during_gateway_restart(api_test_client, mock_client):
+    """Test 26: Gateway recovery after transient outage returns 503 then resumes 202."""
+    # 1. Normal submission
+    r1 = api_test_client.post("/orders", json={
+        "symbol": "AAPL",
+        "side": "buy",
+        "order_type": "limit",
+        "price": 150,
+        "quantity": 10,
+        "time_in_force": "GTC",
+        "client_order_id": 9001
+    })
+    assert r1.status_code == 202
+
+    # 2. Transient failure (simulating restart / network blip)
+    mock_client.should_fail = True
+    r2 = api_test_client.post("/orders", json={
+        "symbol": "AAPL",
+        "side": "buy",
+        "order_type": "limit",
+        "price": 150,
+        "quantity": 10,
+        "time_in_force": "GTC",
+        "client_order_id": 9002
+    })
+    assert r2.status_code == 503
+    assert "failure" in r2.json()["detail"].lower() or "unavailable" in r2.json()["detail"].lower()
+
+    # 3. Gateway recovery
+    mock_client.should_fail = False
+    r3 = api_test_client.post("/orders", json={
+        "symbol": "AAPL",
+        "side": "buy",
+        "order_type": "limit",
+        "price": 150,
+        "quantity": 10,
+        "time_in_force": "GTC",
+        "client_order_id": 9003
+    })
+    assert r3.status_code == 202

@@ -20,6 +20,7 @@ private:
     ReadModel&          read_model;
 
     std::atomic<bool>   is_running{false};
+    std::atomic<bool>   worker_fault{false};
     std::thread         worker_thread;
     ProjectorStats      stats;
 
@@ -33,5 +34,6 @@ public:
     void stop();
 
     bool isRunning() const { return is_running.load(std::memory_order_relaxed); }
+    bool isHealthy() const { return is_running.load(std::memory_order_relaxed) && !worker_fault.load(std::memory_order_relaxed); }
     const ProjectorStats& getStats() const { return stats; }
 };

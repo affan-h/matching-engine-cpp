@@ -247,183 +247,214 @@ void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
 }
 
 void TcpGateway::runGateway() {
-    constexpr int MAX_EVENTS = 64;
-    struct kevent event_list[MAX_EVENTS];
-    uint8_t recv_buf[4096];
+    try {
+        constexpr int MAX_EVENTS = 64;
+        struct kevent event_list[MAX_EVENTS];
+        uint8_t recv_buf[4096];
 
-    // Timeout 100ms for responsiveness to shutdown
-    struct timespec timeout{};
-    timeout.tv_sec = 0;
-    timeout.tv_nsec = 100000000; // 100 ms
+        // Timeout 100ms for responsiveness to shutdown
+        struct timespec timeout{};
+        timeout.tv_sec = 0;
+        timeout.tv_nsec = 100000000; // 100 ms
 
-    while (is_running.load(std::memory_order_relaxed)) {
-        int cur_kq = kq_fd.load(std::memory_order_acquire);
-        if (cur_kq < 0) break;
+        while (is_running.load(std::memory_order_relaxed)) {
+            int cur_kq = kq_fd.load(std::memory_order_acquire);
+            if (cur_kq < 0) break;
 
-        int n_events = kevent(cur_kq, nullptr, 0, event_list, MAX_EVENTS, &timeout);
+            int n_events = kevent(cur_kq, nullptr, 0, event_list, MAX_EVENTS, &timeout);
 
-        if (n_events < 0) {
-            if (errno == EINTR) continue;
-            break; // Socket closed or error during shutdown
-        }
+            if (n_events < 0) {
+                if (errno == EINTR) continue;
+                break; // Socket closed or error during shutdown
+            }
 
-        int cur_listen = listen_fd.load(std::memory_order_acquire);
+            int cur_listen = listen_fd.load(std::memory_order_acquire);
 
-        for (int i = 0; i < n_events; ++i) {
-            int fd = static_cast<int>(event_list[i].ident);
+            for (int i = 0; i < n_events; ++i) {
+                int fd = static_cast<int>(event_list[i].ident);
 
-            if (cur_listen >= 0 && fd == cur_listen) {
-                // Accept new client connections in a non-blocking loop
-                while (true) {
-                    sockaddr_in client_addr{};
-                    socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(cur_listen, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+                if (cur_listen >= 0 && fd == cur_listen) {
+                    // Accept new client connections in a non-blocking loop
+                    while (true) {
+                        sockaddr_in client_addr{};
+                        socklen_t client_len = sizeof(client_addr);
+                        int client_fd = accept(cur_listen, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
 
-                    if (client_fd < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            break; // No more pending connections
-                        }
-                        break;
-                    }
-
-                    // Enforce max active connections limit
-                    if (clients.size() >= config.max_connections) {
-                        if (config.enable_logging) {
-                            std::cerr << "[TcpGateway] Max connections limit (" << config.max_connections << ") reached, rejecting client fd=" << client_fd << "\n";
-                        }
-                        close(client_fd);
-                        stats.connections_rejected++;
-                        continue;
-                    }
-
-                    // Configure non-blocking client socket
-                    int cflags = fcntl(client_fd, F_GETFL, 0);
-                    if (cflags >= 0) {
-                        fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
-                    }
-
-                    // Prevent SIGPIPE on write to closed socket on macOS
-#ifdef SO_NOSIGPIPE
-                    int set_nosigpipe = 1;
-                    setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &set_nosigpipe, sizeof(set_nosigpipe));
-#endif
-
-                    // Register client with kqueue for read events
-                    struct kevent client_ev{};
-                    EV_SET(&client_ev, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-                    int reg_kq = kq_fd.load(std::memory_order_acquire);
-                    if (reg_kq >= 0 && kevent(reg_kq, &client_ev, 1, nullptr, 0, nullptr) == 0) {
-                        ClientConnection conn;
-                        conn.fd = client_fd;
-                        clients[client_fd] = std::move(conn);
-                        active_clients++;
-                        stats.connections_accepted++;
-                    } else {
-                        close(client_fd);
-                    }
-                }
-            } else {
-                // Data available on client socket
-                auto it = clients.find(fd);
-                if (it == clients.end()) continue;
-
-                ClientConnection& client = it->second;
-                bool should_close = false;
-
-                while (true) {
-                    ssize_t n = recv(fd, recv_buf, sizeof(recv_buf), 0);
-
-                    if (n > 0) {
-                        // Check buffer overflow protection
-                        if (client.parser.remainingBytes() + static_cast<size_t>(n) > config.max_client_buffer) {
-                            stats.buffer_overflows++;
-                            if (config.enable_logging) {
-                                std::cerr << "[TcpGateway] Client fd=" << fd << " exceeded max buffer size (" << config.max_client_buffer << " bytes)\n";
+                        if (client_fd < 0) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break; // No more pending connections
                             }
-                            should_close = true;
                             break;
                         }
 
-                        client.parser.append(recv_buf, static_cast<size_t>(n));
+                        // Enforce max active connections limit
+                        if (clients.size() >= config.max_connections) {
+                            if (config.enable_logging) {
+                                std::cerr << "[TcpGateway] Max connections limit (" << config.max_connections << ") reached, rejecting client fd=" << client_fd << "\n";
+                            }
+                            close(client_fd);
+                            stats.connections_rejected++;
+                            continue;
+                        }
 
-                        // Parse all complete frames in buffer
-                        while (true) {
-                            ParsedFrame frame{};
-                            ParseError err = ParseError::None;
-                            ParseStatus status = client.parser.parseNextFrame(frame, err);
+                        // Configure non-blocking client socket
+                        int cflags = fcntl(client_fd, F_GETFL, 0);
+                        if (cflags >= 0) {
+                            fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
+                        }
 
-                            if (status == ParseStatus::Ok) {
-                                if (frame.category == FrameCategory::Session) {
-                                    handleSession(fd, frame.session);
-                                } else if (frame.category == FrameCategory::Command) {
-                                    frame.command.client_fd = fd;
-                                    // Push to SPSC Queue with bounded backpressure retries
-                                    bool pushed = false;
-                                    for (int retry = 0; retry < config.max_backpressure_retries; ++retry) {
-                                        if (queue.push(frame.command)) {
-                                            pushed = true;
-                                            break;
-                                        }
-                                        std::this_thread::yield();
-                                    }
+                        // Prevent SIGPIPE on write to closed socket on macOS
+#ifdef SO_NOSIGPIPE
+                        int set_nosigpipe = 1;
+                        setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &set_nosigpipe, sizeof(set_nosigpipe));
+#endif
 
-                                    if (!pushed) {
-                                        stats.queue_full_drops++;
-                                        if (config.enable_logging) {
-                                            std::cerr << "[TcpGateway] SPSC command queue full, dropping command from client fd=" << fd << "\n";
-                                        }
-                                        should_close = true;
-                                        break;
-                                    } else {
-                                        stats.events_pushed++;
-                                    }
-                                } else if (frame.category == FrameCategory::Query) {
-                                    handleQuery(fd, frame.query);
-                                    stats.queries_processed++;
-                                }
-                            } else if (status == ParseStatus::NeedMoreData) {
-                                break; // Waiting for more network bytes
-                            } else {
-                                stats.malformed_frames++;
+                        // Register client with kqueue for read events
+                        struct kevent client_ev{};
+                        EV_SET(&client_ev, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
+                        int reg_kq = kq_fd.load(std::memory_order_acquire);
+                        if (reg_kq >= 0 && kevent(reg_kq, &client_ev, 1, nullptr, 0, nullptr) == 0) {
+                            ClientConnection conn;
+                            conn.fd = client_fd;
+                            clients[client_fd] = std::move(conn);
+                            active_clients++;
+                            stats.connections_accepted++;
+                        } else {
+                            close(client_fd);
+                        }
+                    }
+                } else {
+                    // Data available on client socket
+                    auto it = clients.find(fd);
+                    if (it == clients.end()) continue;
+
+                    ClientConnection& client = it->second;
+                    bool should_close = false;
+
+                    while (true) {
+                        ssize_t n = recv(fd, recv_buf, sizeof(recv_buf), 0);
+
+                        if (n > 0) {
+                            // Check buffer overflow protection
+                            if (client.parser.remainingBytes() + static_cast<size_t>(n) > config.max_client_buffer) {
+                                stats.buffer_overflows++;
                                 if (config.enable_logging) {
-                                    std::cerr << "[TcpGateway] Client fd=" << fd << " sent malformed frame (code=" << static_cast<int>(err) << ")\n";
+                                    std::cerr << "[TcpGateway] Client fd=" << fd << " exceeded max buffer size (" << config.max_client_buffer << " bytes)\n";
                                 }
                                 should_close = true;
                                 break;
                             }
-                        }
 
-                        if (should_close) break;
-                    } else if (n == 0) {
-                        // Clean EOF / client disconnect
-                        should_close = true;
-                        break;
-                    } else {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            break; // All socket data drained
+                            client.parser.append(recv_buf, static_cast<size_t>(n));
+
+                            // Parse all complete frames in buffer
+                            while (true) {
+                                ParsedFrame frame{};
+                                ParseError err = ParseError::None;
+                                ParseStatus status = client.parser.parseNextFrame(frame, err);
+
+                                if (status == ParseStatus::Ok) {
+                                    if (frame.category == FrameCategory::Session) {
+                                        handleSession(fd, frame.session);
+                                    } else if (frame.category == FrameCategory::Command) {
+                                        frame.command.client_fd = fd;
+                                        // Push to SPSC Queue with bounded backpressure retries
+                                        bool pushed = false;
+                                        for (int retry = 0; retry < config.max_backpressure_retries; ++retry) {
+                                            if (queue.push(frame.command)) {
+                                                pushed = true;
+                                                break;
+                                            }
+                                            std::this_thread::yield();
+                                        }
+
+                                        if (!pushed) {
+                                            stats.queue_full_drops++;
+                                            if (config.enable_logging) {
+                                                std::cerr << "[TcpGateway] SPSC command queue full, dropping command from client fd=" << fd << "\n";
+                                            }
+                                            should_close = true;
+                                            break;
+                                        } else {
+                                            stats.events_pushed++;
+                                        }
+                                    } else if (frame.category == FrameCategory::Query) {
+                                        handleQuery(fd, frame.query);
+                                        stats.queries_processed++;
+                                    }
+                                } else if (status == ParseStatus::NeedMoreData) {
+                                    break; // Waiting for more network bytes
+                                } else {
+                                    stats.malformed_frames++;
+                                    if (config.enable_logging) {
+                                        std::cerr << "[TcpGateway] Client fd=" << fd << " sent malformed frame (code=" << static_cast<int>(err) << ")\n";
+                                    }
+                                    should_close = true;
+                                    break;
+                                }
+                            }
+
+                            if (should_close) break;
+                        } else if (n == 0) {
+                            // Clean EOF / client disconnect
+                            should_close = true;
+                            break;
+                        } else {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break; // All socket data drained
+                            }
+                            if (errno == EINTR) {
+                                continue;
+                            }
+                            // Fatal socket error
+                            should_close = true;
+                            break;
                         }
-                        if (errno == EINTR) {
-                            continue;
-                        }
-                        // Fatal socket error
-                        should_close = true;
-                        break;
                     }
-                }
 
-                if (should_close || (event_list[i].flags & EV_EOF)) {
-                    closeClient(fd);
+                    if (should_close || (event_list[i].flags & EV_EOF)) {
+                        closeClient(fd);
+                    }
                 }
             }
         }
+    } catch (const std::exception& e) {
+        worker_fault.store(true, std::memory_order_release);
+        std::cerr << "[TcpGateway] Fatal worker exception in gateway loop: " << e.what() << "\n";
+    } catch (...) {
+        worker_fault.store(true, std::memory_order_release);
+        std::cerr << "[TcpGateway] Fatal unknown exception in gateway loop\n";
     }
 }
 
 void TcpGateway::runConsumer() {
-    OrderEvent event;
+    try {
+        OrderEvent event;
 
-    while (is_running.load(std::memory_order_relaxed)) {
-        if (queue.pop(event)) {
+        while (is_running.load(std::memory_order_relaxed)) {
+            if (queue.pop(event)) {
+                switch (event.type) {
+                    case EventType::LimitOrder:
+                        engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif, event.client_order_id);
+                        break;
+                    case EventType::MarketOrder:
+                        engine.addMarketOrder(event.instrument, event.side, event.qty, event.client_order_id);
+                        break;
+                    case EventType::CancelOrder:
+                        engine.cancelOrder(event.instrument, event.id, event.client_order_id);
+                        break;
+                    case EventType::ModifyOrder:
+                        engine.modifyOrder(event.instrument, event.id, event.price, event.qty, event.client_order_id);
+                        break;
+                }
+                stats.events_processed++;
+            } else {
+                std::this_thread::yield();
+            }
+        }
+
+        // Drain remaining queue items during shutdown
+        while (queue.pop(event)) {
             switch (event.type) {
                 case EventType::LimitOrder:
                     engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif, event.client_order_id);
@@ -439,27 +470,12 @@ void TcpGateway::runConsumer() {
                     break;
             }
             stats.events_processed++;
-        } else {
-            std::this_thread::yield();
         }
-    }
-
-    // Drain remaining queue items during shutdown
-    while (queue.pop(event)) {
-        switch (event.type) {
-            case EventType::LimitOrder:
-                engine.addLimitOrder(event.instrument, event.side, event.price, event.qty, event.tif, event.client_order_id);
-                break;
-            case EventType::MarketOrder:
-                engine.addMarketOrder(event.instrument, event.side, event.qty, event.client_order_id);
-                break;
-            case EventType::CancelOrder:
-                engine.cancelOrder(event.instrument, event.id, event.client_order_id);
-                break;
-            case EventType::ModifyOrder:
-                engine.modifyOrder(event.instrument, event.id, event.price, event.qty, event.client_order_id);
-                break;
-        }
-        stats.events_processed++;
+    } catch (const std::exception& e) {
+        worker_fault.store(true, std::memory_order_release);
+        std::cerr << "[TcpGateway] Fatal worker exception in consumer loop: " << e.what() << "\n";
+    } catch (...) {
+        worker_fault.store(true, std::memory_order_release);
+        std::cerr << "[TcpGateway] Fatal unknown exception in consumer loop\n";
     }
 }

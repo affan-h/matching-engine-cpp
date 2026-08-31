@@ -560,13 +560,37 @@ tests/
   dashboard.cpp         Live ncurses terminal dashboard
   cli.cpp               Interactive CLI — all order types
   simulation.cpp        Multi-threaded producer/consumer, 5M orders
-  test_engine.cpp       23-case matching engine correctness suite
+  test_engine.cpp       24-case matching engine correctness suite
   test_wire_protocol.cpp 21-case wire protocol & parser test suite
-  test_gateway.cpp      32-case TCP kqueue gateway integration test suite
-  test_read_model.cpp   17-case C++ ReadModel and Projector test suite
-  test_api.py           24-case FastAPI and end-to-end integration test suite
+  test_gateway.cpp      38-case TCP kqueue gateway integration test suite
+  test_read_model.cpp   20-case C++ ReadModel and Projector test suite
+  test_api.py           26-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark latency suite with naive baseline
 ```
+
+---
+
+## Durability, Recovery & Crash-Consistency Architecture
+
+### 1. In-Memory Design & Restart Semantics
+- **State Lifecycle**: The core matching engine and projection model operate purely in-memory for maximum throughput and sub-microsecond determinism. No disk write-ahead log (WAL) or snapshot persistence is maintained.
+- **Process Restart**: Upon startup or process restart, the platform initializes with a clean, deterministic state: sequence numbers begin at 0, order books are empty, and `ReadModel` is marked synchronized with 0 registered trades/orders.
+- **Query Determinism**: Freshly started instances immediately serve valid empty responses (e.g. empty depth snapshots with `bid_count=0`, empty trade lists `[]`, and `404 Order Not Found`) without panics or memory corruption.
+
+### 2. End-to-End Graceful Shutdown & Drain Guarantees
+- **Ingress Quiescence**: When SIGINT or SIGTERM is received (or `TcpGateway::stop()` is called), the listening socket and `kqueue` loop immediately stop accepting new client connections.
+- **Command Queue Drain**: The matching engine consumer thread drains every in-flight command from the `SPSCQueue` into the core engine before exiting.
+- **Outbound Projection Drain**: `Projector::stop()` drains all remaining execution events (`Trade`, `OrderState`, `L2Update`) from the `OutboundEventQueue` into the `ReadModel`, ensuring 100% projection consistency prior to process termination.
+- **Signal Safety**: Signal handlers execute only lock-free atomic flag stores (`std::atomic<bool> g_shutdown{true}`), remaining strictly POSIX async-signal-safe without memory allocations or mutex locks.
+
+### 3. Command Identity & Client Idempotency
+- **Client Correlation IDs**: Every command supports a 64-bit `client_order_id`.
+- **Duplicate Prevention & Retry Pattern**: Clients encountering network timeouts or disconnects can query `GET /orders/{client_order_id}?by_client_id=true` to determine if their previous command succeeded before issuing a retry.
+- **State Regression Locks**: The `ReadModel` enforces sequence checks and terminal state protection (`Filled`, `Cancelled`, `Rejected` states cannot be regressed by delayed or out-of-order updates).
+
+### 4. Worker Thread Crash Isolation & Health Reflection
+- **Exception Boundaries**: Top-level exception handlers in `TcpGateway` and `Projector` catch worker faults, record `worker_fault` atomics, and log diagnostic output without silent thread termination.
+- **Health Propagation**: Active component health (`isHealthy()`) is queried by the `/health` endpoint, immediately reporting degraded status (`HTTP 503`) if any background worker encounters a failure.
 
 ---
 
@@ -587,6 +611,7 @@ tests/
 13. **Defensive Non-Zero Capacity Guards**: Added non-zero capacity assertions in `BoundedTradeHistory` and `ReadModel` preventing modulo division-by-zero on edge configurations.
 14. **Matching Engine Hot-Path Optimization & Zero-Allocation Depth Extraction**: Streamlined `publishSnapshot` and `cancelOrder` by guarding snapshot generation when no feed subscribers or outbound queues are attached; added `OrderBook::getDepthFast` to eliminate heap vector allocations and linear linked-list node counting during L2 updates; eliminated redundant bitmap lookups in matching loops.
 15. **Production Observability, Health & Readiness Semantics, and Config Validation**: Added non-blocking telemetry counters across `MatchingEngine` (accepted/rejected/cancelled counts, traded volume, coalesced drops, critical event retries), `TcpGateway` (connections accepted/closed/rejected, queue drops, overflows), and `Projector` (shutdown drain count); added strict CLI/env configuration bounds validation; enriched `/health` endpoint with active RTT measurements, readiness state, and read model health.
+16. **Durability Boundaries, Crash-Consistency & Recovery Hardening**: Hardened worker thread exception boundaries in `TcpGateway` and `Projector`; introduced `worker_fault` and `isHealthy()` lifecycle status; verified empty-state query determinism across `ReadModel`; hardened connection pool recovery and malformed traffic reconnects.
 
 ---
 

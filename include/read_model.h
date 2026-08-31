@@ -130,6 +130,7 @@ private:
 
     // Aggregate telemetry metrics
     EngineMetrics metrics;
+    std::atomic<bool> is_synchronized{true};
 
     void recordOrderInternal(const OrderRecord& record);
 
@@ -156,6 +157,10 @@ public:
 
     bool getMetrics(EngineMetrics& out) const;
     uint64_t getLastSequence() const;
+
+    // Synchronization and Readiness
+    bool isReady() const { return is_synchronized.load(std::memory_order_relaxed); }
+    void setSynchronized(bool syncd) { is_synchronized.store(syncd, std::memory_order_release); }
 
     void getRegisteredSymbols(std::vector<std::pair<InstrumentId, std::string>>& out) const;
     size_t getTradeCount(InstrumentId id) const;

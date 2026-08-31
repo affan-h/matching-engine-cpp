@@ -666,6 +666,51 @@ TEST(test_projector_shutdown_drain_accounting) {
     assert(model.getLastSequence() == 10);
 }
 
+// 19. ReadModel Readiness and Synchronization State
+TEST(test_read_model_readiness_and_synchronization_state) {
+    ReadModel model(100, 100);
+    assert(model.isReady());
+
+    model.setSynchronized(false);
+    assert(!model.isReady());
+
+    model.setSynchronized(true);
+    assert(model.isReady());
+}
+
+// 20. ReadModel Empty Query Determinism Across All Planes
+TEST(test_read_model_empty_query_determinism) {
+    ReadModel model(100, 100);
+    model.registerSymbol(0, "AAPL");
+    model.registerSymbol(1, "RELIANCE");
+
+    // 1. Query L2 book for registered symbol with 0 orders
+    L2BookState book;
+    assert(model.getL2Book(0, book));
+    assert(book.bid_count == 0);
+    assert(book.ask_count == 0);
+    assert(book.symbol == "AAPL");
+
+    // 2. Query trades for empty instrument
+    std::vector<TradeRecord> trades;
+    assert(model.getRecentTrades(0, 10, trades));
+    assert(trades.empty());
+
+    // 3. Query nonexistent order IDs
+    OrderRecord ord;
+    assert(!model.getOrder(999, ord));
+    assert(!model.getOrderByClientId(888, ord));
+
+    // 4. Query metrics
+    EngineMetrics m;
+    assert(model.getMetrics(m));
+    assert(m.total_trades == 0);
+    assert(m.total_volume == 0);
+    assert(m.last_sequence == 0);
+    assert(m.tracked_orders_count == 0);
+    assert(m.registered_symbols_count == 2);
+}
+
 int main() {
     std::cout << "\n===== Read Model & Projector Test Suite =====\n\n";
 
@@ -687,6 +732,8 @@ int main() {
     RUN_TEST(test_read_model_heavy_concurrent_reads_and_writes);
     RUN_TEST(test_projector_sustained_backpressure_and_drain);
     RUN_TEST(test_projector_shutdown_drain_accounting);
+    RUN_TEST(test_read_model_readiness_and_synchronization_state);
+    RUN_TEST(test_read_model_empty_query_determinism);
 
     std::cout << "\n=============================================\n";
     std::cout << "Results: " << passed << " passed, 0 failed\n\n";

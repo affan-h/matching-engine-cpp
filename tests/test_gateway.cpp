@@ -1279,6 +1279,120 @@ TEST(test_gateway_operational_statistics_accounting) {
 }
 
 // ─────────────────────────────────────────────
+// 36. Malformed Frame Followed by Clean Reconnect
+// ─────────────────────────────────────────────
+TEST(test_gateway_malformed_traffic_followed_by_clean_reconnect) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    // 1. Client 1 sends completely invalid garbage -> triggers disconnect
+    int c1 = connect_client(gateway.getBoundPort());
+    ASSERT(c1 >= 0, "Client 1 connects");
+    std::vector<uint8_t> garbage = {0xFF, 0xFF, 0x00, 0x12, 0x34};
+    send_all(c1, garbage);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    close(c1);
+
+    ASSERT(gateway.getStats().malformed_frames.load() >= 1, "Malformed frame recorded");
+
+    // 2. Client 2 reconnects and executes a valid Ping and Limit Order
+    int c2 = connect_client(gateway.getBoundPort());
+    ASSERT(c2 >= 0, "Client 2 reconnects cleanly");
+
+    auto ping = wire::encode_ping(777);
+    send_all(c2, ping);
+    auto [type, p_ping] = recv_response(c2);
+    ASSERT(type == wire::MessageType::Pong, "Client 2 receives Pong");
+    ASSERT(wire::read_u64_be(p_ping.data()) == 777, "Nonce matches");
+
+    auto order = wire::encode_limit_order(aapl, Side::Buy, 150, 10, TimeInForce::GTC, 12345ULL);
+    send_all(c2, order);
+
+    close(c2);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 37. Gateway Liveness and Health Semantics
+// ─────────────────────────────────────────────
+TEST(test_gateway_liveness_and_worker_health_semantics) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config);
+    ASSERT(!gateway.isRunning(), "Not running before start");
+    ASSERT(!gateway.isHealthy(), "Not healthy before start");
+
+    ASSERT(gateway.start(), "Start succeeds");
+    ASSERT(gateway.isRunning(), "Running after start");
+    ASSERT(gateway.isHealthy(), "Healthy after start");
+
+    gateway.stop();
+    ASSERT(!gateway.isRunning(), "Not running after stop");
+    ASSERT(!gateway.isHealthy(), "Not healthy after stop");
+}
+
+// ─────────────────────────────────────────────
+// 38. Connection Saturation and Recovery
+// ─────────────────────────────────────────────
+TEST(test_gateway_connection_saturation_and_recovery) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+    config.max_connections = 3;
+
+    TcpGateway gateway(engine, queue, config);
+    ASSERT(gateway.start(), "Gateway starts");
+
+    int port = gateway.getBoundPort();
+    int c1 = connect_client(port);
+    int c2 = connect_client(port);
+    int c3 = connect_client(port);
+    ASSERT(c1 >= 0 && c2 >= 0 && c3 >= 0, "3 connections opened");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT(gateway.getClientCount() == 3, "3 active clients");
+
+    // 4th connection is rejected
+    int c4 = connect_client(port);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    uint8_t buf[8];
+    ssize_t r = ::recv(c4, buf, sizeof(buf), 0);
+    ASSERT(r <= 0, "4th connection rejected");
+    close(c4);
+
+    // Close c1 and c2 -> active count drops to 1
+    close(c1);
+    close(c2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT(gateway.getClientCount() == 1, "Active clients dropped to 1");
+
+    // Now a new client connects successfully
+    int c5 = connect_client(port);
+    ASSERT(c5 >= 0, "New client connects after capacity freed");
+    auto ping = wire::encode_ping(999);
+    send_all(c5, ping);
+    auto [t, p] = recv_response(c5);
+    ASSERT(t == wire::MessageType::Pong, "New client functional");
+
+    close(c3);
+    close(c5);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -1320,6 +1434,9 @@ int main() {
     RUN(test_gateway_invalid_configuration_rejection);
     RUN(test_gateway_max_connections_limit_enforcement);
     RUN(test_gateway_operational_statistics_accounting);
+    RUN(test_gateway_malformed_traffic_followed_by_clean_reconnect);
+    RUN(test_gateway_liveness_and_worker_health_semantics);
+    RUN(test_gateway_connection_saturation_and_recovery);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";
