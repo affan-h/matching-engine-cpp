@@ -33,6 +33,13 @@ bool TcpGateway::start() {
         return true;
     }
 
+    std::string config_err;
+    if (!config.isValid(&config_err)) {
+        std::cerr << "[TcpGateway] Invalid configuration: " << config_err << "\n";
+        is_running.store(false, std::memory_order_release);
+        return false;
+    }
+
     // 1. Create TCP listening socket
     int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (lfd < 0) {
@@ -279,6 +286,16 @@ void TcpGateway::runGateway() {
                         break;
                     }
 
+                    // Enforce max active connections limit
+                    if (clients.size() >= config.max_connections) {
+                        if (config.enable_logging) {
+                            std::cerr << "[TcpGateway] Max connections limit (" << config.max_connections << ") reached, rejecting client fd=" << client_fd << "\n";
+                        }
+                        close(client_fd);
+                        stats.connections_rejected++;
+                        continue;
+                    }
+
                     // Configure non-blocking client socket
                     int cflags = fcntl(client_fd, F_GETFL, 0);
                     if (cflags >= 0) {
@@ -317,9 +334,12 @@ void TcpGateway::runGateway() {
                     ssize_t n = recv(fd, recv_buf, sizeof(recv_buf), 0);
 
                     if (n > 0) {
-                        // Check buffer overflow protection (16 KB max)
+                        // Check buffer overflow protection
                         if (client.parser.remainingBytes() + static_cast<size_t>(n) > config.max_client_buffer) {
                             stats.buffer_overflows++;
+                            if (config.enable_logging) {
+                                std::cerr << "[TcpGateway] Client fd=" << fd << " exceeded max buffer size (" << config.max_client_buffer << " bytes)\n";
+                            }
                             should_close = true;
                             break;
                         }
@@ -349,6 +369,9 @@ void TcpGateway::runGateway() {
 
                                     if (!pushed) {
                                         stats.queue_full_drops++;
+                                        if (config.enable_logging) {
+                                            std::cerr << "[TcpGateway] SPSC command queue full, dropping command from client fd=" << fd << "\n";
+                                        }
                                         should_close = true;
                                         break;
                                     } else {
@@ -362,6 +385,9 @@ void TcpGateway::runGateway() {
                                 break; // Waiting for more network bytes
                             } else {
                                 stats.malformed_frames++;
+                                if (config.enable_logging) {
+                                    std::cerr << "[TcpGateway] Client fd=" << fd << " sent malformed frame (code=" << static_cast<int>(err) << ")\n";
+                                }
                                 should_close = true;
                                 break;
                             }

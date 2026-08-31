@@ -1148,6 +1148,137 @@ TEST(test_gateway_adversarial_disconnect_burst_during_active_traffic) {
 }
 
 // ─────────────────────────────────────────────
+// 33. Invalid Configuration Rejection
+// ─────────────────────────────────────────────
+TEST(test_gateway_invalid_configuration_rejection) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+
+    // Port out of bounds
+    GatewayConfig cfg1;
+    cfg1.port = 99999;
+    TcpGateway gw1(engine, queue, cfg1);
+    ASSERT(!gw1.start(), "Gateway must fail to start on invalid port 99999");
+    ASSERT(!gw1.isRunning(), "Gateway must not be running");
+
+    // Buffer too small (< 256)
+    GatewayConfig cfg2;
+    cfg2.port = 0;
+    cfg2.max_client_buffer = 50;
+    TcpGateway gw2(engine, queue, cfg2);
+    ASSERT(!gw2.start(), "Gateway must fail on buffer < 256");
+
+    // Backpressure retries 0
+    GatewayConfig cfg3;
+    cfg3.port = 0;
+    cfg3.max_backpressure_retries = 0;
+    TcpGateway gw3(engine, queue, cfg3);
+    ASSERT(!gw3.start(), "Gateway must fail on retries 0");
+
+    // Max connections 0
+    GatewayConfig cfg4;
+    cfg4.port = 0;
+    cfg4.max_connections = 0;
+    TcpGateway gw4(engine, queue, cfg4);
+    ASSERT(!gw4.start(), "Gateway must fail on max_connections 0");
+}
+
+// ─────────────────────────────────────────────
+// 34. Max Connections Limit Enforcement
+// ─────────────────────────────────────────────
+TEST(test_gateway_max_connections_limit_enforcement) {
+    MatchingEngine engine;
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+    config.max_connections = 2; // Limit to 2 concurrent clients
+
+    TcpGateway gateway(engine, queue, config);
+    ASSERT(gateway.start(), "Gateway starts with max_connections=2");
+
+    int port = gateway.getBoundPort();
+    int c1 = connect_client(port);
+    int c2 = connect_client(port);
+    ASSERT(c1 >= 0 && c2 >= 0, "First 2 clients connect successfully");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT(gateway.getClientCount() == 2, "Active clients should be 2");
+
+    // 3rd client exceeds limit
+    int c3 = connect_client(port);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Attempting to send on c3 should fail or encounter EOF
+    auto ping = wire::encode_ping(1);
+    ssize_t sent = ::send(c3, ping.data(), ping.size(), 0);
+    (void)sent;
+
+    uint8_t dummy[16];
+    ssize_t recvd = ::recv(c3, dummy, sizeof(dummy), 0);
+    ASSERT(recvd <= 0, "3rd connection must be closed by gateway due to max_connections limit");
+    ASSERT(gateway.getStats().connections_rejected.load() >= 1, "Expected connections_rejected to be incremented");
+
+    // Verify first 2 clients are still perfectly functional
+    auto ping_c1 = wire::encode_ping(100);
+    send_all(c1, ping_c1);
+    auto [type1, p1] = recv_response(c1);
+    ASSERT(type1 == wire::MessageType::Pong, "Client 1 still responsive");
+
+    close(c1);
+    close(c2);
+    close(c3);
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
+// 35. Gateway Operational Statistics Accounting
+// ─────────────────────────────────────────────
+TEST(test_gateway_operational_statistics_accounting) {
+    MatchingEngine engine;
+    InstrumentId aapl = engine.registerInstrument("AAPL");
+    ReadModel read_model(100, 100);
+    read_model.registerSymbol(aapl, "AAPL");
+
+    SPSCQueue queue(1024);
+    GatewayConfig config;
+    config.port = 0;
+
+    TcpGateway gateway(engine, queue, config, &read_model);
+    gateway.start();
+
+    int client = connect_client(gateway.getBoundPort());
+
+    // 1. Session frame (Ping)
+    auto ping = wire::encode_ping(42);
+    send_all(client, ping);
+    recv_response(client);
+
+    // 2. Command frame (Limit order)
+    auto order = wire::encode_limit_order(aapl, Side::Buy, 150, 10, TimeInForce::GTC, 999ULL);
+    send_all(client, order);
+
+    // 3. Query frame (Query stats)
+    auto qstats = wire::encode_query_stats();
+    send_all(client, qstats);
+    recv_response(client);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    const auto& stats = gateway.getStats();
+    ASSERT(stats.connections_accepted.load() == 1, "1 connection accepted");
+    ASSERT(stats.session_frames_processed.load() == 1, "1 session frame");
+    ASSERT(stats.events_pushed.load() == 1, "1 command pushed");
+    ASSERT(stats.events_processed.load() == 1, "1 command processed");
+    ASSERT(stats.queries_processed.load() == 1, "1 query processed");
+
+    close(client);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT(stats.connections_closed.load() == 1, "1 connection closed");
+
+    gateway.stop();
+}
+
+// ─────────────────────────────────────────────
 // Main Test Runner
 // ─────────────────────────────────────────────
 int main() {
@@ -1186,6 +1317,9 @@ int main() {
     RUN(test_gateway_start_stop_restart_cycle);
     RUN(test_gateway_sustained_concurrent_client_load);
     RUN(test_gateway_adversarial_disconnect_burst_during_active_traffic);
+    RUN(test_gateway_invalid_configuration_rejection);
+    RUN(test_gateway_max_connections_limit_enforcement);
+    RUN(test_gateway_operational_statistics_accounting);
 
     std::cout << "\n=======================================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n\n";

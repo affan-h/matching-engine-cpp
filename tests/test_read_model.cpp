@@ -641,6 +641,31 @@ TEST(test_projector_sustained_backpressure_and_drain) {
     assert(projector.getStats().trades_projected.load() == TOTAL_EVENTS);
 }
 
+// 18. Projector Shutdown Drain Accounting
+TEST(test_projector_shutdown_drain_accounting) {
+    ReadModel model(100, 100);
+    model.registerSymbol(0, "AAPL");
+
+    OutboundEventQueue queue(64);
+    for (int i = 1; i <= 10; ++i) {
+        events::OutboundEvent evt;
+        evt.type = events::OutboundEventType::Trade;
+        evt.trade.trade_id = i;
+        evt.trade.instrument_id = 0;
+        evt.trade.price = 100;
+        evt.trade.quantity = 1;
+        evt.trade.sequence = i;
+        queue.push(evt);
+    }
+
+    Projector projector(queue, model);
+    projector.start();
+    projector.stop();
+
+    assert(projector.getStats().events_projected.load() == 10);
+    assert(model.getLastSequence() == 10);
+}
+
 int main() {
     std::cout << "\n===== Read Model & Projector Test Suite =====\n\n";
 
@@ -661,6 +686,7 @@ int main() {
     RUN_TEST(test_multi_instrument_causal_sequencing);
     RUN_TEST(test_read_model_heavy_concurrent_reads_and_writes);
     RUN_TEST(test_projector_sustained_backpressure_and_drain);
+    RUN_TEST(test_projector_shutdown_drain_accounting);
 
     std::cout << "\n=============================================\n";
     std::cout << "Results: " << passed << " passed, 0 failed\n\n";

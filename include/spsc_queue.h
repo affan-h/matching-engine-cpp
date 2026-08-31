@@ -17,7 +17,7 @@ private:
     alignas(64) std::atomic<size_t> tail{0};
 
 public:
-    explicit LockFreeSPSCQueue(size_t size) : buffer(size), capacity(size) {}
+    explicit LockFreeSPSCQueue(size_t size) : buffer(size < 2 ? 2 : size), capacity(size < 2 ? 2 : size) {}
 
     // Called ONLY by the single Producer thread
     bool push(const T& item) {

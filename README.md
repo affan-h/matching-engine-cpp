@@ -280,6 +280,49 @@ Response (`200 OK`):
 }
 ```
 
+#### 4. Active Health & Subsystem Readiness Probe
+```bash
+curl http://127.0.0.1:8000/health
+```
+Response (`200 OK`):
+```json
+{
+  "status": "healthy",
+  "ready": true,
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 12345,
+    "connected": true,
+    "rtt_ms": 0.32
+  },
+  "read_model": {
+    "active": true,
+    "last_sequence": 5000000,
+    "registered_symbols": 4,
+    "tracked_orders": 10000,
+    "total_trades": 1666666
+  },
+  "symbols": ["AAPL", "RELIANCE", "INFY", "TATASTEEL"]
+}
+```
+
+---
+
+## Operational Configuration & Environment Variables
+
+The C++ Gateway and Python REST API support deterministic startup validation and environment variable overrides:
+
+| CLI Option | Environment Variable | Default | Valid Range | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `-p`, `--port` | `MATCHING_ENGINE_GATEWAY_PORT` | `12345` | `0..65535` (`0` for ephemeral) | TCP listening port for binary wire protocol |
+| `-h`, `--host` | `MATCHING_ENGINE_GATEWAY_HOST` | `127.0.0.1` | Valid IPv4 string | TCP bind address |
+| `--command-queue` | `MATCHING_ENGINE_COMMAND_QUEUE_SIZE` | `65536` | `1024..1048576` (Power of 2) | Bounded lock-free SPSC command queue capacity |
+| `--outbound-queue` | `MATCHING_ENGINE_OUTBOUND_QUEUE_SIZE`| `65536` | `1024..1048576` (Power of 2) | Bounded lock-free SPSC outbound event queue capacity |
+| `--trade-history` | `MATCHING_ENGINE_TRADE_HISTORY_CAP` | `1000` | `10..1000000` | Max recent trade circular buffer capacity per symbol |
+| `--order-history` | `MATCHING_ENGINE_ORDER_HISTORY_CAP` | `10000` | `10..1000000` | Max order state record history with FIFO eviction |
+| `--max-connections`| — | `1024` | `1..65536` | Maximum concurrent active client connections |
+| `-v`, `--verbose` | — | `false` | Boolean flag | Enable structured diagnostic operational logging |
+
 ---
 
 ## Binary TCP Wire Protocol Specification
@@ -543,6 +586,7 @@ tests/
 12. **ThreadSanitizer Data Race Resolution**: Eliminated asynchronous races in `TcpGateway::stop` vs `runGateway` by converting listening socket and kqueue descriptors into atomic variables and utilizing atomic exchange for shutdown unblocking.
 13. **Defensive Non-Zero Capacity Guards**: Added non-zero capacity assertions in `BoundedTradeHistory` and `ReadModel` preventing modulo division-by-zero on edge configurations.
 14. **Matching Engine Hot-Path Optimization & Zero-Allocation Depth Extraction**: Streamlined `publishSnapshot` and `cancelOrder` by guarding snapshot generation when no feed subscribers or outbound queues are attached; added `OrderBook::getDepthFast` to eliminate heap vector allocations and linear linked-list node counting during L2 updates; eliminated redundant bitmap lookups in matching loops.
+15. **Production Observability, Health & Readiness Semantics, and Config Validation**: Added non-blocking telemetry counters across `MatchingEngine` (accepted/rejected/cancelled counts, traded volume, coalesced drops, critical event retries), `TcpGateway` (connections accepted/closed/rejected, queue drops, overflows), and `Projector` (shutdown drain count); added strict CLI/env configuration bounds validation; enriched `/health` endpoint with active RTT measurements, readiness state, and read model health.
 
 ---
 

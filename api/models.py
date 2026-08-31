@@ -166,14 +166,25 @@ class SystemMetricsResponse(BaseModel):
     gateway_connected: bool
 
 
+class ReadModelStatus(BaseModel):
+    active: bool
+    last_sequence: int
+    registered_symbols: int
+    tracked_orders: int
+    total_trades: int
+
+
 class GatewayStatus(BaseModel):
     host: str
     port: int
     connected: bool
+    rtt_ms: Optional[float] = None
     error: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
     status: str
+    ready: bool = True
     gateway: GatewayStatus
+    read_model: Optional[ReadModelStatus] = None
     symbols: List[str]

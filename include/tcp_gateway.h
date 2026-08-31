@@ -22,11 +22,34 @@ struct GatewayConfig {
     int port = 12345;                    // 0 = ephemeral port (useful for tests)
     size_t max_client_buffer = 16384;    // 16 KB max per-client parser buffer
     int max_backpressure_retries = 1000; // Bounded retries when SPSC queue is full
+    size_t max_connections = 1024;       // Max concurrent active client connections
+    bool enable_logging = false;         // Enable structured diagnostic error logging
+
+    bool isValid(std::string* error_msg = nullptr) const {
+        if (port < 0 || port > 65535) {
+            if (error_msg) *error_msg = "Port must be in range 0..65535";
+            return false;
+        }
+        if (max_client_buffer < 64 || max_client_buffer > 1048576) {
+            if (error_msg) *error_msg = "max_client_buffer must be between 64 and 1048576 bytes";
+            return false;
+        }
+        if (max_backpressure_retries < 1 || max_backpressure_retries > 100000) {
+            if (error_msg) *error_msg = "max_backpressure_retries must be between 1 and 100000";
+            return false;
+        }
+        if (max_connections == 0 || max_connections > 65536) {
+            if (error_msg) *error_msg = "max_connections must be between 1 and 65536";
+            return false;
+        }
+        return true;
+    }
 };
 
 struct GatewayStats {
     std::atomic<uint64_t> connections_accepted{0};
     std::atomic<uint64_t> connections_closed{0};
+    std::atomic<uint64_t> connections_rejected{0};
     std::atomic<uint64_t> events_pushed{0};
     std::atomic<uint64_t> events_processed{0};
     std::atomic<uint64_t> queries_processed{0};

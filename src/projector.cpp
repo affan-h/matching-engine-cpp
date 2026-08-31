@@ -55,6 +55,7 @@ void Projector::run() {
     while (outbound_queue.pop(event)) {
         read_model.applyEvent(event);
         stats.events_projected++;
+        stats.drained_on_shutdown++;
         switch (event.type) {
             case events::OutboundEventType::Trade:
                 stats.trades_projected++;

@@ -270,14 +270,15 @@ class GatewayTcpClient:
                         continue
                     raise GatewayUnavailableError(f"Gateway connection lost during query: {e}")
 
-    def check_health(self) -> bool:
-        """Actively checks if the TCP gateway is accepting connections and responsive to heartbeats."""
+    def probe_health(self) -> Dict[str, Any]:
+        """Performs active TCP socket ping probe, measuring roundtrip latency in milliseconds."""
+        import time
+        t0 = time.perf_counter()
         try:
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             probe.settimeout(0.5)
             probe.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             probe.connect((self.host, self.port))
-            # Send ping frame (MessageType 0x05) to verify protocol responsiveness
             ping_frame = encode_ping(12345)
             probe.sendall(ping_frame)
             hdr = probe.recv(3)
@@ -286,11 +287,21 @@ class GatewayTcpClient:
                 if msg_type == MessageType.PONG and payload_len == 8:
                     payload = probe.recv(8)
                     probe.close()
-                    return len(payload) == 8
+                    elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+                    return {"connected": len(payload) == 8, "rtt_ms": elapsed_ms, "error": None}
             probe.close()
-            return True
-        except Exception:
-            return False
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+            return {"connected": True, "rtt_ms": elapsed_ms, "error": None}
+        except Exception as e:
+            return {
+                "connected": False,
+                "rtt_ms": None,
+                "error": f"C++ TCP Gateway is unreachable / refusing connections: {e}",
+            }
+
+    def check_health(self) -> bool:
+        """Actively checks if the TCP gateway is accepting connections and responsive to heartbeats."""
+        return self.probe_health()["connected"]
 
     def close(self):
         """Close the active client connection."""

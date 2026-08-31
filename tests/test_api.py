@@ -113,6 +113,11 @@ class MockGatewayTcpClient(GatewayTcpClient):
     def check_health(self) -> bool:
         return not self.should_fail
 
+    def probe_health(self) -> Dict[str, Any]:
+        if self.should_fail:
+            return {"connected": False, "rtt_ms": None, "error": "Mock gateway is unreachable"}
+        return {"connected": True, "rtt_ms": 0.1, "error": None}
+
 
 @pytest.fixture
 def mock_client():
@@ -613,3 +618,18 @@ def test_real_gateway_end_to_end():
         real_client.close()
         proc.terminate()
         proc.wait(timeout=2)
+
+
+def test_health_readiness_and_diagnostics(api_test_client, mock_client):
+    """Test 25: Enhanced health endpoint returns structured readiness and read model status."""
+    r = api_test_client.get("/health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "healthy"
+    assert data["ready"] is True
+    assert data["gateway"]["connected"] is True
+    assert data["gateway"]["rtt_ms"] is not None
+    assert data["read_model"] is not None
+    assert data["read_model"]["active"] is True
+    assert data["read_model"]["registered_symbols"] == 4
+    assert "AAPL" in data["symbols"]

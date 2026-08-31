@@ -19,6 +19,13 @@ private:
     OrderId  nextOrderId = 0;
     uint64_t nextTradeId = 0;
     uint64_t totalTrades = 0;
+    uint64_t totalOrdersAccepted = 0;
+    uint64_t totalOrdersRejected = 0;
+    uint64_t totalOrdersCancelled = 0;
+    uint64_t totalVolume = 0;
+    uint64_t l2CoalescedDrops = 0;
+    uint64_t criticalEventRetries = 0;
+    uint64_t criticalEventDrops = 0;
 
     OutboundEventQueue*    outboundQueue = nullptr;
     uint64_t               globalSequence = 0;
@@ -138,6 +145,13 @@ public:
     void logTrade(const Trade& trade);
 
     uint64_t getTotalTrades() const { return totalTrades; }
+    uint64_t getTotalOrdersAccepted() const { return totalOrdersAccepted; }
+    uint64_t getTotalOrdersRejected() const { return totalOrdersRejected; }
+    uint64_t getTotalOrdersCancelled() const { return totalOrdersCancelled; }
+    uint64_t getTotalVolume() const { return totalVolume; }
+    uint64_t getL2CoalescedDrops() const { return l2CoalescedDrops; }
+    uint64_t getCriticalEventRetries() const { return criticalEventRetries; }
+    uint64_t getCriticalEventDrops() const { return criticalEventDrops; }
 
     OrderId generateOrderId();
 };

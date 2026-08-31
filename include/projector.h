@@ -11,6 +11,7 @@ struct ProjectorStats {
     std::atomic<uint64_t> trades_projected{0};
     std::atomic<uint64_t> l2_updates_projected{0};
     std::atomic<uint64_t> order_states_projected{0};
+    std::atomic<uint64_t> drained_on_shutdown{0};
 };
 
 class Projector {

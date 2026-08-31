@@ -36,16 +36,21 @@ void MatchingEngine::publishOutbound(const events::OutboundEvent& event)
 
     if (event.type == events::OutboundEventType::L2Update) {
         // Coalescing policy for L2 snapshots: non-blocking push
-        outboundQueue->push(event);
+        if (!outboundQueue->push(event)) {
+            ++l2CoalescedDrops;
+        }
         return;
     }
 
     // Bounded retries for Trade and OrderState execution events
     for (int retry = 0; retry < 100; ++retry) {
         if (outboundQueue->push(event)) return;
+        ++criticalEventRetries;
         std::this_thread::yield();
     }
-    outboundQueue->push(event);
+    if (!outboundQueue->push(event)) {
+        ++criticalEventDrops;
+    }
 }
 
 void MatchingEngine::emitOrderState(
@@ -96,6 +101,7 @@ Trade MatchingEngine::createTrade(
     trade.timestamp = getCurrentTime();
     trade.tradeId = ++nextTradeId;
     ++totalTrades;
+    totalVolume += qty;
 
     if (incoming.side == Side::Buy)
     {
@@ -184,6 +190,7 @@ OrderId MatchingEngine::addLimitOrder(
 {
     if (__builtin_expect(price == 0 || qty == 0 || price > 100000, 0)) {
         OrderId id = generateOrderId();
+        ++totalOrdersRejected;
         emitOrderState(id, client_order_id, instrument, side, price, qty, 0, 0,
                        events::OrderStatus::Rejected, events::RejectCode::InvalidPriceQty, getCurrentTime());
         return id;
@@ -210,12 +217,14 @@ OrderId MatchingEngine::addLimitOrder(
     {
         Quantity available = book.getAvailableVolume(side, price);
         if (available < incoming.quantity) {
+            ++totalOrdersRejected;
             emitOrderState(id, client_order_id, instrument, side, price, qty, 0, 0,
                            events::OrderStatus::Rejected, events::RejectCode::InsufficientLiquidityFOK, incoming.timestamp);
             return id;  // Cannot fully fill — cancel entire order, no trades
         }
     }
 
+    ++totalOrdersAccepted;
     Quantity orig_qty = qty;
 
     if (side == Side::Buy)
@@ -319,10 +328,13 @@ OrderId MatchingEngine::addMarketOrder(
 {
     if (__builtin_expect(qty == 0, 0)) {
         OrderId id = generateOrderId();
+        ++totalOrdersRejected;
         emitOrderState(id, client_order_id, instrument, side, 0, qty, 0, 0,
                        events::OrderStatus::Rejected, events::RejectCode::InvalidPriceQty, getCurrentTime());
         return id;
     }
+
+    ++totalOrdersAccepted;
 
     if (instrument >= books.size()) {
         books.resize(instrument + 1);
@@ -423,6 +435,7 @@ bool MatchingEngine::cancelOrder(
         bool found = books[instrument].getOrder(id, order);
         bool ok = books[instrument].cancelOrder(id);
         if (ok) {
+            ++totalOrdersCancelled;
             emitOrderState(id, client_order_id, instrument, found ? order.side : Side::Buy, found ? order.price : 0,
                            found ? order.quantity : 0, 0, 0,
                            events::OrderStatus::Cancelled, events::RejectCode::None, getCurrentTime());
@@ -435,8 +448,11 @@ bool MatchingEngine::cancelOrder(
     }
 
     bool ok = books[instrument].cancelOrder(id);
-    if (ok && feed.hasSubscribers()) {
-        publishSnapshot(instrument);
+    if (ok) {
+        ++totalOrdersCancelled;
+        if (feed.hasSubscribers()) {
+            publishSnapshot(instrument);
+        }
     }
     return ok;
 }

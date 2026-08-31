@@ -529,6 +529,44 @@ TEST(test_order_lifecycle_rapid_churn) {
 }
 
 // ─────────────────────────────────────────────
+// Test: Matching Engine Operational Telemetry Counters
+// ─────────────────────────────────────────────
+TEST(test_engine_telemetry_counters) {
+    MatchingEngine engine;
+    InstrumentId inst = engine.registerInstrument("AAPL");
+    OutboundEventQueue queue(64);
+    engine.setOutboundQueue(&queue);
+
+    ASSERT(engine.getTotalOrdersAccepted() == 0, "Initial accepted 0");
+    ASSERT(engine.getTotalOrdersRejected() == 0, "Initial rejected 0");
+    ASSERT(engine.getTotalOrdersCancelled() == 0, "Initial cancelled 0");
+    ASSERT(engine.getTotalVolume() == 0, "Initial volume 0");
+
+    // 1. Submit 2 valid limit orders
+    OrderId b1 = engine.addLimitOrder(inst, Side::Buy, 100, 10, TimeInForce::GTC, 101ULL);
+    OrderId b2 = engine.addLimitOrder(inst, Side::Buy, 100, 20, TimeInForce::GTC, 102ULL);
+    (void)b2;
+    ASSERT(engine.getTotalOrdersAccepted() == 2, "Accepted 2 orders");
+
+    // 2. Submit invalid orders (price 0, qty 0)
+    engine.addLimitOrder(inst, Side::Buy, 0, 10, TimeInForce::GTC, 103ULL);
+    engine.addMarketOrder(inst, Side::Buy, 0, 104ULL);
+    ASSERT(engine.getTotalOrdersRejected() == 2, "Rejected 2 orders");
+
+    // 3. Cancel an order
+    bool c_ok = engine.cancelOrder(inst, b1, 105ULL);
+    ASSERT(c_ok, "Cancel b1 succeeded");
+    ASSERT(engine.getTotalOrdersCancelled() == 1, "Cancelled 1 order");
+
+    // 4. Match with a market order
+    engine.addMarketOrder(inst, Side::Sell, 15, 106ULL);
+    ASSERT(engine.getTotalOrdersAccepted() == 3, "Accepted market sell");
+    ASSERT(engine.getTotalTrades() == 1, "Executed 1 trade");
+    ASSERT(engine.getTotalVolume() == 15, "Volume 15");
+    ASSERT(engine.getLastSequence() > 0, "Sequence monotonically progressed");
+}
+
+// ─────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────
 int main() {
@@ -557,6 +595,7 @@ int main() {
     RUN(test_orderbook_bit_63_boundary);
     RUN(test_modify_invalid_price_qty_preserves_resting_order);
     RUN(test_order_lifecycle_rapid_churn);
+    RUN(test_engine_telemetry_counters);
 
     std::cout << "\n======================================\n";
     std::cout << "Results: " << passed << " passed, "

@@ -18,6 +18,7 @@ from api.models import (
     SystemMetricsResponse,
     HealthResponse,
     GatewayStatus,
+    ReadModelStatus,
     OrderTypeEnum,
 )
 from api.tcp_client import GatewayTcpClient, GatewayUnavailableError, GatewayError
@@ -330,15 +331,31 @@ def get_metrics(
 def health_check(
     gateway: GatewayTcpClient = Depends(get_gateway_client),
 ):
-    is_connected = gateway.check_health()
-    if is_connected:
+    probe_result = gateway.probe_health()
+    if probe_result["connected"]:
+        read_model_info = None
+        try:
+            stats = gateway.query_stats()
+            read_model_info = ReadModelStatus(
+                active=True,
+                last_sequence=stats.get("last_sequence", 0),
+                registered_symbols=stats.get("registered_symbols_count", len(SYMBOL_MAP)),
+                tracked_orders=stats.get("tracked_orders_count", 0),
+                total_trades=stats.get("total_trades", 0),
+            )
+        except Exception:
+            pass
+
         return HealthResponse(
             status="healthy",
+            ready=True,
             gateway=GatewayStatus(
                 host=gateway.host,
                 port=gateway.port,
                 connected=True,
+                rtt_ms=probe_result.get("rtt_ms"),
             ),
+            read_model=read_model_info,
             symbols=list(SYMBOL_MAP.keys()),
         )
     else:
@@ -346,12 +363,14 @@ def health_check(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content=HealthResponse(
                 status="degraded",
+                ready=False,
                 gateway=GatewayStatus(
                     host=gateway.host,
                     port=gateway.port,
                     connected=False,
-                    error="C++ TCP Gateway is unreachable / refusing connections",
+                    error=probe_result.get("error") or "C++ TCP Gateway is unreachable / refusing connections",
                 ),
+                read_model=None,
                 symbols=list(SYMBOL_MAP.keys()),
             ).model_dump(),
         )
