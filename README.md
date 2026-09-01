@@ -6,7 +6,11 @@ An in-memory electronic limit order matching service written in modern C++ (C++1
 
 ## What is this?
 
-This project is a high-performance backend service that simulates how financial exchanges match buy and sell orders. It receives order requests over HTTP or binary TCP sockets, checks an internal order book, and executes trades according to price-time priority. Any remaining shares rest in the book until matched or cancelled. Execution events are asynchronously projected into a fast in-memory read model, allowing external clients to query live market depth, recent trades, and order lifecycles with sub-microsecond internal matching latency.
+This project is an in-memory electronic order matching service written in modern C++ (C++17) with a Python FastAPI REST interface. Clients can submit buy and sell orders through standard HTTP endpoints. The matching engine maintains an order book and matches compatible orders using fair price-time priority.
+
+For example, if someone places a buy order for 100 shares of Apple at $150 and another client sells 40 shares at $150, the engine executes a 40-share trade immediately and leaves the remaining 60 shares resting in the book.
+
+Networking and read queries are decoupled from the core matching engine so that high-volume market queries never interfere with trade execution.
 
 ---
 

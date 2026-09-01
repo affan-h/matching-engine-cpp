@@ -1,259 +1,156 @@
-# Comprehensive SDE Interview Guide
+# Master SDE Interview Guide: Order Matching Service
 
-This guide is designed to prepare you to explain and defend the matching engine project naturally, confidently, and deeply in backend software engineering interviews.
-
----
-
-## Elevator Pitches
-
-### 30-Second Explanation (Memorize This)
-> "I built an in-memory limit order book matching engine in C++ exposed via a non-blocking TCP gateway and a Python FastAPI REST interface. It uses a single-threaded matching core with direct-indexed price ladders and hardware bitmap scans to achieve deterministic sub-microsecond matching with zero heap allocations on the hot path. Networking and queries are decoupled from matching using lock-free single-producer single-consumer queues and an in-memory CQRS read model."
+*A structured, conversational guide for software engineering interviews. Starts simple, builds intuitive mental models, and deepens only when probed.*
 
 ---
 
-### 90-Second Explanation
-> "The goal of this project was to understand how low-latency financial systems achieve deterministic performance and concurrency safety.
+## 1. The Pitches
+
+### The 30-Second Pitch (Conversational & Natural)
+> "I built an in-memory order matching service in C++. Clients can submit buy and sell orders through a REST API. The matching engine maintains an order book and matches compatible orders using price-time priority.
 >
-> At the core is a single-threaded C++ matching engine that implements standard Price-Time Priority (FIFO). Because matching is strictly sequential per instrument, running a single matching thread eliminates lock contention, mutex overhead, and race conditions entirely.
+> For example, if someone places a buy order for 100 shares at $150 and another client sells 40 shares at $150, the engine executes a 40-share trade and leaves 60 shares resting in the book.
 >
-> For data structures, instead of a balanced tree like `std::map`, I used a direct-indexed vector price ladder combined with 64-bit word bitmaps. Finding the best bid or ask takes a single hardware bit-scan instruction (`__builtin_clzll` / `__builtin_ctzll`). Orders are allocated from a pre-reserved pool and chained in intrusive doubly linked lists, allowing $O(1)$ order cancellations.
+> I separated networking and read queries from the core matching logic so the matching path stays simple and deterministic."
+
+#### If the Interviewer asks: "What makes it technically interesting?"
+> "A few key things:
+> 1. **Data structures**: Instead of a tree, I used direct-indexed arrays and 64-bit bitmaps so finding the best price takes one hardware bit-scan instruction, and order cancellation is strict O(1).
+> 2. **Concurrency**: The matching core is single-threaded with zero locks, decoupled from the network gateway via lock-free ring buffers.
+> 3. **Reliability**: It passes AddressSanitizer and ThreadSanitizer cleanly across 142 tests and a 5-million order simulation."
+
+---
+
+### The 90-Second Pitch (The Narrative Arc)
+> "The problem I wanted to explore was how high-throughput trading systems achieve predictable, microsecond-scale latency while staying safe under concurrent traffic.
 >
-> To handle client traffic without stalling the core, I separated concerns using a CQRS architecture. A non-blocking BSD `kqueue` TCP gateway parses incoming binary wire frames and pushes them into a lock-free SPSC ring buffer with 64-byte cacheline alignment. The engine processes commands, generates monotonic execution events, and emits them to an outbound queue, where a background Projector updates an in-memory Read Model protected by reader-writer locks for concurrent HTTP queries.
+> To solve this, I built an in-memory order matching service in C++ with a Python FastAPI REST interface.
 >
-> The system has 142 automated tests, passes clean under AddressSanitizer, UndefinedBehaviorSanitizer, and ThreadSanitizer, and processes 5 million simulated orders with full volume and VWAP conservation."
-
----
-
-### 3-Minute Deep Dive
-> "When designing a high-throughput backend service, the primary bottlenecks are usually lock contention, heap allocation overhead, and thread synchronization latency. I wanted to design an electronic exchange prototype that addressed these three bottlenecks directly.
+> When an order comes in through the API, it is converted into a compact binary packet and sent over TCP to a gateway, which queues it for the matching core.
 >
-> First, on the matching core: Standard implementations use balanced binary search trees like red-black trees or `std::map`. While $O(\log N)$ sounds acceptable, pointer chasing through tree nodes causes frequent cache misses, and dynamic node allocation adds heap latency. Instead, I designed the order book around a flat, pre-allocated vector price array and a 64-bit word bitmap. By tracking active price levels with bit flags, finding the best bid or ask compiles down to hardware bit-scan instructions (`lzcnt`/`tzcnt`), executing in a few CPU cycles. Order cancellation is $O(1)$ constant time because each order holds intrusive pointers within a pre-allocated object pool.
+> The matching core checks the order book using standard Price-Time Priority: better prices match first, and orders at the same price are matched in FIFO order. If a compatible opposite order exists, a trade occurs immediately; otherwise, the order rests in the book.
 >
-> Second, on concurrency: A common anti-pattern is sharing mutexes across network threads, matching logic, and query endpoints. Under heavy load, lock contention destroys throughput. I used a Command Query Responsibility Segregation (CQRS) architecture:
-> - The Ingress plane uses a non-blocking event-driven TCP gateway (using BSD `kqueue` on macOS) communicating with clients using a compact binary big-endian protocol.
-> - Ingress threads communicate with the matching engine solely through a cacheline-aligned lock-free Single-Producer Single-Consumer (SPSC) queue.
-> - The matching core runs single-threaded with zero locks.
-> - An outbound SPSC queue feeds a background Projector worker, which updates an in-memory Read Model. Concurrent REST clients querying depth or trade history take shared reader locks on the Read Model, completely isolated from the matching core.
+> For data structures, instead of searching every order when cancelling, I keep a direct index from order ID to the order object, using intrusive linked-list pointers so cancellation can unlink the order directly in O(1) constant time.
 >
-> Finally, for reliability: I implemented clean backpressure bounds, graceful shutdown drain linearization (ensuring all queued orders and events are drained before termination), and comprehensive sanitizers. The repository passes AddressSanitizer, UndefinedBehaviorSanitizer, and ThreadSanitizer without data races or memory leaks, verified across 142 tests and a 5-million order stress simulation."
+> To keep the matching core fast, I separated networking and query traffic from matching. The matching engine runs on its own thread without taking locks, and execution events are projected to an in-memory read model that serves client queries.
+>
+> I verified the system with 142 automated tests, ran it clean under Clang AddressSanitizer and ThreadSanitizer, and benchmarked order matching at around 4 microseconds."
 
 ---
 
-## Core Interview Topics
-
-```
-                      TOPIC MAP
-                      
-         CORE (Must Know Cold)
-           ├── Price-Time Priority & Matching
-           ├── Order Book Data Structures & Bitmaps
-           ├── Order Lifecycle Invariants & States
-           └── CQRS Request Flow
-           
-         SUPPORTING (Should Know)
-           ├── Lock-Free SPSC Queues
-           ├── Why Single-Threaded Core?
-           ├── TCP Gateway & kqueue Reactor
-           └── In-Memory Read Model & Projector
-           
-         ADVANCED (Bonus Points)
-           ├── Zero Heap Allocation on Hot Path
-           ├── Backpressure & Bounded Sockets
-           ├── Shutdown Drain Linearization
-           └── Sanitizer Verification & TSan
-```
+### The 3-Minute Deep Dive (The Complete End-to-End Story)
+> "Let me walk you through the end-to-end architecture by tracing an order from the client all the way through the system:
+>
+> 1. **Client & REST API**: A client submits an order via HTTP, like `POST /orders` to buy 100 shares of Apple at $150. FastAPI validates the request schema and returns a 202 Accepted response with a correlation ID.
+> 2. **TCP Gateway**: Underneath, FastAPI forwards the order over a local TCP connection as a compact 17-byte binary frame to a C++ gateway. The gateway uses non-blocking sockets to receive frames from multiple clients without blocking.
+> 3. **Command Queue**: The gateway pushes the incoming order into an in-memory ring buffer called an SPSC queue. This hands the order to the matching engine without either thread needing to lock the other.
+> 4. **Matching Engine Core**: A dedicated matching thread pops the order and checks the Apple order book.
+> 5. **Order Book & Matching**: The engine checks for compatible sellers. If there is a resting seller at $150 or below, a trade executes immediately at the resting price. If there are no sellers, or if shares remain, the order rests in the book at price level $150.
+> 6. **Outbound Event Queue**: Whenever a trade, order state change, or book depth change occurs, the engine emits an execution event into an outbound queue.
+> 7. **Read Model & Projector**: A background worker thread called the Projector reads these events and updates an in-memory Read Model.
+> 8. **Queries**: When users refresh their dashboard or query `GET /book/AAPL` or `GET /trades/AAPL`, they read from this Read Model using shared read locks, completely isolated from the matching engine.
+>
+> Now, why is it designed this way?
+> - **Why single-threaded core?** Order matching for a single stock is fundamentally sequential. Running a single matching thread eliminates lock contention, mutex overhead, and race conditions.
+> - **Why SPSC queues?** Ring buffers let the network thread and the matching thread communicate with simple atomic memory ordering, avoiding kernel sleep/wake transitions.
+> - **Why a separate Read Model?** If thousands of dashboard users querying market depth had to lock the active order book, matching latency would spike. CQRS keeps the hot path clear.
+> - **Why flat arrays and bitmaps?** Instead of an $O(\log N)$ tree that causes cache misses, flat price arrays give $O(1)$ access, and 64-bit word bitmaps find the best bid or ask in a single CPU instruction (`lzcnt`/`tzcnt`)."
 
 ---
 
-### 1. Price-Time Priority & Matching Algorithm
+## 2. Core Technical Concepts (Teaching Progression)
 
-#### Simple Explanation
-Orders are matched based on who has the best price. If two people offer the exact same price, the person who submitted their order first gets matched first (First In, First Out).
-
-#### Technical Explanation
-- Buy limit orders match against resting asks where $\text{Ask Price} \le \text{Buy Price}$, starting at the lowest ask.
-- Sell limit orders match against resting bids where $\text{Bid Price} \ge \text{Sell Price}$, starting at the highest bid.
-- At each price level, resting orders form a FIFO queue. The incoming aggressive order fills resting orders sequentially until either the incoming order is completely filled or no compatible price levels remain.
-- Unfilled GTC (Good-Til-Cancelled) limit orders rest on their corresponding price level.
-
-#### Why We Chose It
-Price-time priority is the industry standard for transparent, fair electronic markets (used on NASDAQ, NYSE, and crypto exchanges).
-
-#### Likely Interviewer Question
-> *"What happens when an incoming buy order price is higher than the best resting ask?"*
-
-#### Concise Answer
-> "The trade executes at the **resting order's price** (the passive price), not the incoming order's price. The buyer receives price improvement, getting filled at the lower ask price that was already committed to the book."
-
-#### Follow-Up Question & Answer
-> **Q**: *"What if the resting order only has 30 shares and the incoming order wants 100?"*
-> **A**: *"A partial fill occurs. 30 shares trade immediately at the resting price, the resting order is marked FILLED and removed, and the remaining 70 shares continue matching against the next available price level or rest on the book."*
+*Every concept below follows: Simple Explanation $\rightarrow$ Why It Exists $\rightarrow$ How We Use It $\rightarrow$ Technical Details $\rightarrow$ Likely Interviewer Question.*
 
 ---
 
-### 2. Order Book Data Structures: Why Bitmaps & Intrusive Lists?
-
-#### Simple Explanation
-Instead of searching through a long list or tree of orders, we store prices in a flat table and use 64-bit numbers as 'index tabs' to instantly find where orders exist.
-
-#### Technical Explanation
-- **Price Ladder**: Flat `std::vector<PriceLevel>` pre-allocated for discrete prices (0 to 100,000). Direct indexing $O(1)$.
-- **Bitmaps**: A vector of 64-bit integers (`uint64_t`) where each bit represents whether a price level has resting volume.
-  - Best Ask: `findNextAsk` uses `__builtin_ctzll` (Count Trailing Zeros) to find the lowest set bit in a single CPU instruction.
-  - Best Bid: `findNextBid` uses `63 - __builtin_clzll` (Count Leading Zeros) to find the highest set bit.
-- **Intrusive Doubly Linked List**: `Order` objects contain embedded `prev` and `next` pointers.
-- **Order Lookup Table**: A pre-allocated direct array `orderLookup[order_id] = Order*`.
-
-#### Why We Chose It
-`std::map` (Red-Black tree) has $O(\log N)$ lookup and cancellation time, requires dynamic node allocation, and causes pointer chasing. A direct array + bitmap gives $O(1)$ lookup, $O(1)$ cancel, $O(1)$ best price retrieval, and zero cache-line thrashing.
-
-#### Likely Interviewer Question
-> *"Why not use `std::unordered_map` for order lookup and price levels?"*
-
-#### Concise Answer
-> "`std::unordered_map` does not maintain price ordering, so finding the best bid or ask would require scanning all keys ($O(N)$). Hash collisions also cause unpredictable tail latency spikes. Direct-indexed vectors provide deterministic, sub-microsecond $O(1)$ access without hashing overhead."
-
-#### Follow-Up Question & Answer
-> **Q**: *"What is the memory cost of pre-allocating 100,000 price levels?"*
-> **A**: *"Each `PriceLevel` is 24 bytes (head pointer, tail pointer, total volume). For 100,000 levels on bids and asks, total memory is under 5 megabytes—negligible on modern servers, but providing massive cache predictability."*
+### Concept 1: Price-Time Priority (FIFO)
+- **Simple**: Better price wins first. If prices are identical, the older order wins first.
+- **Why It Exists**: It is the industry-standard rule for electronic stock exchanges because it rewards aggressive price setting and fairness.
+- **How We Use It**: Bids match against lowest asks; asks match against highest bids. Within a price level, orders are matched from oldest to newest.
+- **Technical Details**:
+  - A buy order at \$150 matching against a resting ask at \$149 executes at **\$149** (passive resting price improvement).
+  - Trades consume liquidity from the head of the price level's queue.
+- **Likely Interviewer Question**:
+  > *"What happens if a buyer submits an order for 100 shares at \$150, but the best ask only has 30 shares?"*
+  > **Answer**: "A partial fill occurs: 30 shares trade immediately at the resting price, the resting ask is marked FILLED and removed, and the remaining 70 shares continue matching against higher price levels or rest in the book."
 
 ---
 
-### 3. O(1) Cancellation Mechanism
-
-#### Simple Explanation
-When a user cancels an order, we look up its address directly in a table and remove it from its list in one step, without scanning through other orders.
-
-#### Technical Explanation
-1. `Order* node = orderLookup[order_id]` ($O(1)$ direct array index).
-2. If `node == nullptr`, order doesn't exist or was already filled.
-3. Access `PriceLevel& level = (node->side == Buy) ? bids[node->price] : asks[node->price]`.
-4. Intrusive doubly linked list unlink:
-   ```cpp
-   if (node->prev) node->prev->next = node->next;
-   else level.head = node->next;
-   if (node->next) node->next->prev = node->prev;
-   else level.tail = node->prev;
-   ```
-5. Decrement `level.totalVolume -= node->remaining_qty`.
-6. If `level.totalVolume == 0`, clear bit in bitmap (`clearBit`).
-7. Recycle node back to `OrderPool::deallocate(node)` ($O(1)$ push to vector free-list).
-8. Set `orderLookup[order_id] = nullptr`.
-
-#### Likely Interviewer Question
-> *"What benchmark proved your O(1) cancellation was faster than naive list scanning?"*
-
-#### Concise Answer
-> "In our Google Benchmark suite, under order book contention with hundreds of resting orders, naive sequential cancellation took 8.3 microseconds. Our O(1) pointer unlink took 3.5 microseconds—a 2.34x speedup that remains constant regardless of order book depth."
+### Concept 2: Order Book Data Structures & Bitmaps
+- **Simple**: Instead of searching through a big tree or list to find the best price, we keep prices in a flat array and use 64-bit numbers as 'tabs' to mark where orders exist.
+- **Why It Exists**: In standard trees like `std::map`, searching takes $O(\log N)$ and jumping through pointers causes CPU cache misses.
+- **How We Use It**: We allocate an array of price levels from 1 to 100,000. When an order is added, we set the corresponding bit in a 64-bit word bitmap.
+- **Technical Details**:
+  - `findNextAsk` masks lower bits and calls `__builtin_ctzll` (count trailing zeros).
+  - `findNextBid` masks higher bits and calls `__builtin_clzll` (count leading zeros).
+  - Compiles to single CPU hardware instructions (`tzcnt`/`lzcnt`).
+- **Likely Interviewer Question**:
+  > *"What is the memory footprint of pre-allocating 100,000 price levels?"*
+  > **Answer**: "Each `PriceLevel` is 24 bytes (head, tail, volume). For 100,000 levels across bids and asks, total memory is under 5 megabytes—negligible on modern servers, but providing massive cache predictability."
 
 ---
 
-### 4. Order Lifecycle Invariants
-
-#### Simple Explanation
-Every share of an order must always be accounted for: it is either executed in a trade, still waiting on the book, or cancelled.
-
-#### Technical Explanation
-Across all state transitions, the conservation equation strictly holds:
-$$\text{original\_qty} = \text{filled\_qty} + \text{remaining\_qty} + \text{cancelled\_qty}$$
-
-- **`New`**: `rem = orig`, `filled = 0`, `cancelled = 0`.
-- **`PartiallyFilled`**: `rem > 0`, `filled = orig - rem`, `cancelled = 0`.
-- **`Filled`**: `rem = 0`, `filled = orig`, `cancelled = 0`.
-- **`Cancelled`**: `rem = 0`, `filled = pre_cancel_filled`, `cancelled = orig - filled`.
-- **`Rejected`**: `rem = 0`, `filled = 0`, `cancelled = orig`.
-
-#### Key Invariant Rules
-1. `filled_qty` is monotonically non-decreasing.
-2. Terminal states (`Filled`, `Cancelled`, `Rejected`) can never be regressed by delayed or out-of-order network updates.
+### Concept 3: O(1) Cancellation with Intrusive Lists
+- **Simple**: When someone cancels an order, we find its memory address directly from a lookup table and unlink it in one step, without searching through other orders.
+- **Why It Exists**: If an order book has thousands of orders, scanning a list sequentially to find an order takes $O(N)$ time.
+- **How We Use It**: Each `Order` struct contains embedded `prev` and `next` pointers. An array `orderLookup[order_id]` points directly to the `Order`.
+- **Technical Details**:
+  - `Order* node = orderLookup[id];`
+  - Unlink: `node->prev->next = node->next; node->next->prev = node->prev;`
+  - Decrement price level volume; if 0, clear bit in bitmap.
+  - Return `node` to the pre-allocated pool free-list.
+- **Likely Interviewer Question**:
+  > *"Did you measure whether O(1) cancellation actually mattered?"*
+  > **Answer**: "Yes. In our Google Benchmark suite under high order book contention, naive sequential scanning took 8.3 microseconds, while our O(1) pointer unlink took 3.5 microseconds—a 2.34x speedup that stays constant regardless of book depth."
 
 ---
 
-### 5. Why Single-Threaded Matching Core?
-
-#### Simple Explanation
-Matching orders for a stock is fundamentally sequential. Trying to make it multi-threaded with locks slows it down because threads spend all their time waiting on each other.
-
-#### Technical Explanation
-- A limit order book is a shared state machine: Order B's fill depends entirely on whether Order A matched first.
-- If multiple threads try to mutate the same order book, you need coarse-grained mutexes or complex lock-free data structures. Under high write contention, cache coherence traffic (cache invalidation loops) degrades latency by orders of magnitude.
-- By dedicating **one single thread** to matching an instrument, all matching operations are lock-free and wait-free. Memory sits hot in the L1/L2 CPU cache.
-- Multi-core scaling is achieved by **partitioning across instruments** (e.g. Thread 1 matches AAPL, Thread 2 matches RELIANCE), not by multi-threading a single order book.
-
-#### Likely Interviewer Question
-> *"If the matching core is single-threaded, how does the system scale to handle thousands of users?"*
-
-#### Concise Answer
-> "We decouple I/O from matching using a CQRS architecture. Network ingestion and JSON serialization happen across multiple threads in the TCP gateway and FastAPI layer. Validated commands are passed to the matching thread via lock-free ring buffers. The matching thread does only CPU-bound matching without touching network sockets."
+### Concept 4: SPSC Queues
+- **Simple**: A circular pipe connecting two threads where one thread only writes to the tail, and the other thread only reads from the head.
+- **Why It Exists**: It lets the network gateway pass orders to the matching engine without using expensive mutexes or locks.
+- **How We Use It**: The network gateway pushes commands into `command_queue`; the matching engine pops them. The engine pushes execution events into `outbound_queue`; the projector pops them.
+- **Technical Details**:
+  - Single-Producer Single-Consumer circular ring buffer.
+  - Uses `atomic` head and tail with acquire/release memory ordering.
+  - Padded with `alignas(64)` to place head and tail on separate CPU cache lines, eliminating **false sharing**.
+- **Likely Interviewer Question**:
+  > *"Why not use a Multi-Producer Single-Consumer (MPSC) queue?"*
+  > **Answer**: "Because our TCP Gateway multiplexes all client connections onto a single event-loop thread. Therefore, there is only one producer thread pushing into the queue, so an SPSC queue is sufficient and avoids the expensive atomic CAS retry loops required by MPSC queues."
 
 ---
 
-### 6. Lock-Free SPSC Queue & Cache-Line Isolation
-
-#### Simple Explanation
-It's a circular array where one thread only writes to the tail, and one thread only reads from the head. Because they touch different ends, they don't block each other.
-
-#### Technical Explanation
-- Single-Producer Single-Consumer (SPSC) circular ring buffer.
-- `head` and `tail` are atomic indices.
-  - Producer writes `buffer[tail]` and executes `tail.store(next, std::memory_order_release)`.
-  - Consumer reads `tail` with `memory_order_acquire`, reads `buffer[head]`, and executes `head.store(next, std::memory_order_release)`.
-- **Cache-Line Isolation**:
-  `alignas(64) std::atomic<size_t> head;`
-  `alignas(64) std::atomic<size_t> tail;`
-  Prevents **false sharing**, where two CPU cores constantly invalidate each other's L1 cache line even though they are modifying different variables.
-
-#### Likely Interviewer Question
-> *"Why not use an MPSC (Multi-Producer Single-Consumer) queue if multiple network connections exist?"*
-
-#### Concise Answer
-> "In our design, the TCP Gateway runs a single-threaded event loop (kqueue) that multiplexes all client connections. Therefore, there is only one producer pushing into the command queue and one consumer (the matching engine) popping from it. An SPSC queue requires only acquire-release memory fences and avoids expensive atomic CAS (Compare-And-Swap) loops required by MPSC queues."
+### Concept 5: CQRS Read Model & Reader-Writer Locks
+- **Simple**: We keep the 'matching' copy of the order book completely separate from the 'querying' copy.
+- **Why It Exists**: If hundreds of people refreshing their browser dashboards had to lock the active order book, incoming trade execution would be delayed.
+- **How We Use It**: The matching engine runs on its own thread and emits execution events. A background worker updates an in-memory Read Model. REST clients query the Read Model.
+- **Technical Details**:
+  - Read Model uses `std::shared_mutex`.
+  - Dashboard queries take a shared read lock (`std::shared_lock`), allowing hundreds of concurrent readers.
+  - The Projector worker takes an exclusive write lock (`std::unique_lock`) only when applying events.
+- **Likely Interviewer Question**:
+  > *"Does this introduce eventual consistency?"*
+  > **Answer**: "Yes, there is an ultra-low latency eventual consistency window—typically a few microseconds—between when an order matches and when it appears in the read model. Within the matching engine itself, state is 100% strictly consistent and sequential."
 
 ---
 
-### 7. Graceful Shutdown & Drain Linearization
-
-#### Simple Explanation
-When the server stops, it doesn't drop orders or corrupt state. It stops accepting new clients, processes all in-flight orders in the queue, updates the read model, and then exits cleanly.
-
-#### Technical Explanation
-Shutdown follows a strict linear sequence:
-1. **Stop Ingress**: `gateway.stop()` closes the listening socket and halts the `kqueue` loop. No new connections or frames are accepted.
-2. **Signal In-Flight Clients**: Atomic `stop_traffic` flags signal client threads to stop sending.
-3. **Drain Command Queue**: The consumer thread drains all remaining commands from the SPSC queue into the matching engine.
-4. **Drain Outbound Events**: The engine finishes processing and signals the outbound queue.
-5. **Project Remaining Events**: `Projector::stop()` drains all execution events (`Trade`, `OrderState`, `L2Update`) into the `ReadModel`.
-6. **Reclaim Sockets**: All client sockets are closed cleanly.
-- **Conservation Verified**: `events_pushed == events_processed` with zero memory leaks.
+### Concept 6: Order Lifecycle Invariant
+- **Simple**: Every share of an order must always be accounted for: executed, waiting on the book, or cancelled.
+- **Why It Exists**: Prevents silent quantity corruption, double fills, or phantom shares.
+- **How We Use It**: Verified mathematically across all state transitions:
+  $$\text{original\_qty} = \text{filled\_qty} + \text{remaining\_qty} + \text{cancelled\_qty}$$
+- **Technical Details**:
+  - `filled_qty` is monotonically non-decreasing.
+  - Terminal states (`FILLED`, `CANCELLED`, `REJECTED`) cannot be regressed by delayed or out-of-order network updates.
 
 ---
 
-### 8. Sanitizers & Bounded Concurrency Testing
-
-#### Simple Explanation
-We compile the code with special compiler tools that catch memory bugs, undefined behavior, and multi-threaded race conditions at runtime.
-
-#### Technical Explanation
-- **AddressSanitizer (ASan)**: Detects heap buffer overflows, use-after-free, and memory leaks.
-- **UndefinedBehaviorSanitizer (UBSan)**: Detects integer overflows, bit shifts past word sizes (e.g. `1ULL << 64`), and alignment faults.
-- **ThreadSanitizer (TSan)**: Instruments memory accesses and locks with shadow memory to catch data races.
-- **Strict Bounded Execution**:
-  Because TSan has an 8x–10x performance overhead, concurrency tests must have deterministic bounded iteration counts and explicit timeouts rather than unbounded polling loops.
-  - `test_read_model_tsan`: 24 tests passed in **7.01s**.
-  - `test_gateway_tsan`: 42 tests passed in **24.53s**.
-  - 0 data races, 0 deadlocks across 66 concurrency tests.
-
----
-
-### 9. What I Would Build Next (Future Improvements)
-
-If an interviewer asks *"What are the limitations and what would you build next?"*, give this structured answer:
-
-1. **Write-Ahead Logging (WAL) & Persistence**:
-   Currently, the engine is in-memory only. I would add an append-only WAL using memory-mapped files (`mmap`) with asynchronous fsync to allow state reconstruction upon restart.
-2. **Linux `epoll` Port**:
-   The current gateway uses BSD `kqueue` for macOS. I would introduce an abstraction layer supporting `epoll` for production Linux deployments.
-3. **Multi-Instrument Sharding**:
-   Spin up dedicated matching engine worker threads per financial instrument to scale horizontally across multi-socket server hardware.
-4. **FIX Protocol / WebSocket Gateway**:
-   Support industry-standard Financial Information eXchange (FIX) protocol for institutions and WebSocket streaming for real-time order book level 2 feeds.
+### Concept 7: Sanitizers & Concurrency Verification
+- **Simple**: Compiler diagnostic tools that monitor running code to catch memory bugs and multi-threaded race conditions.
+- **Why It Exists**: Concurrency bugs and memory leaks are notoriously difficult to catch with simple unit tests because they depend on thread timing.
+- **How We Use It**:
+  - **AddressSanitizer / UndefinedBehaviorSanitizer**: 115 tests clean, 0 memory leaks, 0 buffer overflows, 0 undefined bit shifts.
+  - **ThreadSanitizer (TSan)**: 66 multithreaded tests clean, 0 data races, running in 31.5 seconds.
+- **Likely Interviewer Question**:
+  > *"Did ThreadSanitizer help you find any real bugs during development?"*
+  > **Answer**: "Yes. TSan exposed a test where client threads generated traffic in an unbounded loop while the gateway was draining. Because the stop flag was set after `gateway.stop()`, the drain loop spun for minutes under TSan instrumentation. By bounding the burst and signaling stop before initiating shutdown, the test runtime dropped from 30 minutes to 2.4 seconds with zero races."
