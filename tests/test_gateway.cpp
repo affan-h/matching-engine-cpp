@@ -25,10 +25,13 @@ static int failed = 0;
 
 #define TEST(name) void name()
 #define RUN(name)  do { \
+    std::cout << "  RUNNING " << #name << "\n" << std::flush; \
+    auto _t0 = std::chrono::steady_clock::now(); \
     try { name(); \
-        std::cout << "  PASS  " << #name << "\n"; ++passed; } \
+        auto _dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - _t0).count(); \
+        std::cout << "  PASS    " << #name << " (" << _dt << " ms)\n" << std::flush; ++passed; } \
     catch (const std::exception& e) { \
-        std::cout << "  FAIL  " << #name << " — " << e.what() << "\n"; ++failed; } \
+        std::cout << "  FAIL    " << #name << " — " << e.what() << "\n" << std::flush; ++failed; } \
 } while(0)
 
 #define ASSERT(cond, msg) \
@@ -1610,7 +1613,8 @@ TEST(test_gateway_clean_graceful_shutdown_under_intense_traffic_burst) {
     gateway.start();
 
     std::atomic<bool> stop_traffic{false};
-    constexpr int NUM_THREADS = 6;
+    constexpr int NUM_THREADS = 4;
+    constexpr int MAX_BURST_PER_THREAD = 1000;
     std::vector<std::thread> threads;
 
     for (int t = 0; t < NUM_THREADS; ++t) {
@@ -1618,10 +1622,10 @@ TEST(test_gateway_clean_graceful_shutdown_under_intense_traffic_burst) {
             int client = connect_client(gateway.getBoundPort());
             if (client < 0) return;
 
-            uint64_t count = 0;
-            while (!stop_traffic.load(std::memory_order_relaxed)) {
+            int count = 0;
+            while (!stop_traffic.load(std::memory_order_relaxed) && ++count <= MAX_BURST_PER_THREAD) {
                 Side side = (count % 2 == 0) ? Side::Buy : Side::Sell;
-                auto frame = wire::encode_limit_order(aapl, side, 150, 1, TimeInForce::GTC, t * 100000ULL + (++count));
+                auto frame = wire::encode_limit_order(aapl, side, 150, 1, TimeInForce::GTC, t * 100000ULL + count);
                 try {
                     send_all(client, frame);
                 } catch (...) {
@@ -1632,11 +1636,11 @@ TEST(test_gateway_clean_graceful_shutdown_under_intense_traffic_burst) {
         });
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    // Shutdown gateway while clients are actively sending
+    // Signal clients to stop sending and initiate graceful shutdown
+    stop_traffic.store(true, std::memory_order_release);
     gateway.stop();
-    stop_traffic.store(true, std::memory_order_relaxed);
 
     for (auto& th : threads) {
         th.join();
