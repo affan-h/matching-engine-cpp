@@ -563,7 +563,7 @@ tests/
   test_engine.cpp       26-case matching engine correctness suite
   test_wire_protocol.cpp 23-case wire protocol & parser test suite
   test_gateway.cpp      42-case TCP kqueue gateway integration test suite
-  test_read_model.cpp   23-case C++ ReadModel and Projector test suite
+  test_read_model.cpp   24-case C++ ReadModel and Projector test suite
   test_api.py           27-case FastAPI and end-to-end integration test suite
   benchmark.cpp         Google Benchmark latency suite with naive baseline
 ```
@@ -583,8 +583,8 @@ tests/
 - **Outbound Projection Drain**: `Projector::stop()` drains all remaining execution events (`Trade`, `OrderState`, `L2Update`) from the `OutboundEventQueue` into the `ReadModel`, ensuring 100% projection consistency prior to process termination.
 - **Signal Safety**: Signal handlers execute only lock-free atomic flag stores (`std::atomic<bool> g_shutdown{true}`), remaining strictly POSIX async-signal-safe without memory allocations or mutex locks.
 
-### 3. Command Identity & Client Idempotency
-- **Client Correlation IDs**: Every command supports a 64-bit `client_order_id`.
+### 3. Command Correlation & Queryable Retry Pattern
+- **Client Correlation IDs**: Every command supports a 64-bit `client_order_id`. The matching engine core assigns a unique monotonic `order_id` to every submitted order. The `client_order_id` is a correlation ID indexed by `ReadModel` for queryability.
 - **Duplicate Prevention & Retry Pattern**: Clients encountering network timeouts or disconnects can query `GET /orders/{client_order_id}?by_client_id=true` to determine if their previous command succeeded before issuing a retry.
 - **State Regression Locks**: The `ReadModel` enforces sequence checks and terminal state protection (`Filled`, `Cancelled`, `Rejected` states cannot be regressed by delayed or out-of-order updates).
 
@@ -615,6 +615,7 @@ tests/
 17. **Bounded TCP Write Retries & Adversarial Stress Hardening**: Added bounded retry loops in `send_all_socket` preventing hung client connections from spinning indefinitely on `EAGAIN`; added comprehensive tests for multi-client concurrent queries/commands, hostile fuzzing, and clean shutdown under high-throughput order bursts.
 18. **OrderBook Price Boundary Guards & SPSC Adversarial Verification**: Added explicit boundary clamps to `findNextAsk` (`0..MAX_PRICE`) and `findNextBid` (`-1..MAX_PRICE`) preventing negative indexing on edge checks; added adversarial SPSC queue tests verifying bounded capacity clamps (`< 2 -> 2`), exact fill detection, and circular FIFO ordering.
 19. **ReadModel Multi-Fill Cumulative Quantity & Client Order ID Preservation**: Fixed order tracking in `recordOrderInternal` where subsequent partial fill events on resting orders previously wiped `client_order_id` to 0 and replaced `original_qty` with the intermediate resting volume; now preserves original quantity and client correlation IDs while accurately calculating cumulative `filled_qty` across multi-stage fills.
+20. **State Machine Invariants & Bounded Socket Write Retries**: Fixed `ReadModel::recordOrderInternal` to preserve cumulative filled quantity on order cancellation and size reduction after partial fills (`filled_qty` remains intact rather than overwritten to `original_qty`); bounded `send_all_socket` retries (`MAX_SEND_RETRIES = 500`) with automatic client socket teardown upon send failure to prevent gateway event-loop stalls.
 
 ---
 

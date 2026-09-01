@@ -95,8 +95,8 @@ private:
     void runGateway();
     void runConsumer();
     void closeClient(int fd);
-    void handleSession(int fd, const SessionFrame& session);
-    void handleQuery(int fd, const QueryFrame& query);
+    bool handleSession(int fd, const SessionFrame& session);
+    bool handleQuery(int fd, const QueryFrame& query);
 
 public:
     TcpGateway(

@@ -64,13 +64,24 @@ void ReadModel::recordOrderInternal(const OrderRecord& record) {
             updated.client_order_id = it->second.client_order_id;
         }
 
-        // Preserve original_qty across subsequent partial fills
+        // Preserve original_qty across subsequent updates
         if (it->second.original_qty > 0) {
             updated.original_qty = it->second.original_qty;
         }
 
-        // Compute exact cumulative filled_qty: original_qty - remaining_qty
-        if (updated.original_qty >= updated.remaining_qty) {
+        if (updated.status == events::OrderStatus::Cancelled) {
+            // Cancellation preserves cumulative filled quantity prior to cancel; remaining is zero
+            updated.filled_qty = it->second.filled_qty;
+            updated.remaining_qty = 0;
+        } else if (updated.status == events::OrderStatus::Rejected) {
+            updated.filled_qty = 0;
+            updated.remaining_qty = 0;
+        } else if (updated.status == events::OrderStatus::New && it->second.filled_qty > 0) {
+            // In-place size reduction of an already partially filled order preserves PartiallyFilled
+            updated.status = events::OrderStatus::PartiallyFilled;
+            updated.filled_qty = it->second.filled_qty;
+        } else if (updated.original_qty >= updated.remaining_qty) {
+            // Normal New, PartiallyFilled, and Filled cumulative filled quantity
             updated.filled_qty = updated.original_qty - updated.remaining_qty;
         }
     } else {

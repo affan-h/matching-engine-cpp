@@ -883,6 +883,91 @@ TEST(test_read_model_multi_fill_cumulative_quantity_and_client_order_id_preserva
     assert(rec.status == events::OrderStatus::Filled);
 }
 
+// 24. Cancel and Modify After Partial Fill State Invariants
+TEST(test_read_model_cancel_and_modify_after_partial_fill) {
+    ReadModel model(100, 100);
+    model.registerSymbol(0, "AAPL");
+
+    // 1. New Order #888 with client_order_id 9991 and original_qty 100
+    events::OutboundEvent e1;
+    e1.type = events::OutboundEventType::OrderState;
+    e1.order.order_id = 888;
+    e1.order.client_order_id = 9991;
+    e1.order.instrument_id = 0;
+    e1.order.side = Side::Buy;
+    e1.order.price = 150;
+    e1.order.original_qty = 100;
+    e1.order.remaining_qty = 100;
+    e1.order.filled_qty = 0;
+    e1.order.status = events::OrderStatus::New;
+    e1.order.sequence = 1;
+    model.applyEvent(e1);
+
+    // 2. Partial fill: 30 shares matched (rem = 70)
+    events::OutboundEvent e2;
+    e2.type = events::OutboundEventType::OrderState;
+    e2.order.order_id = 888;
+    e2.order.client_order_id = 0;
+    e2.order.instrument_id = 0;
+    e2.order.side = Side::Buy;
+    e2.order.price = 150;
+    e2.order.original_qty = 100;
+    e2.order.remaining_qty = 70;
+    e2.order.filled_qty = 30;
+    e2.order.status = events::OrderStatus::PartiallyFilled;
+    e2.order.sequence = 2;
+    model.applyEvent(e2);
+
+    OrderRecord rec;
+    assert(model.getOrderByClientId(9991, rec));
+    assert(rec.status == events::OrderStatus::PartiallyFilled);
+    assert(rec.original_qty == 100);
+    assert(rec.remaining_qty == 70);
+    assert(rec.filled_qty == 30);
+
+    // 3. In-place modify: size reduced from 70 to 50
+    events::OutboundEvent e3;
+    e3.type = events::OutboundEventType::OrderState;
+    e3.order.order_id = 888;
+    e3.order.client_order_id = 9991;
+    e3.order.instrument_id = 0;
+    e3.order.side = Side::Buy;
+    e3.order.price = 150;
+    e3.order.original_qty = 70;
+    e3.order.remaining_qty = 50;
+    e3.order.filled_qty = 0;
+    e3.order.status = events::OrderStatus::New;
+    e3.order.sequence = 3;
+    model.applyEvent(e3);
+
+    assert(model.getOrderByClientId(9991, rec));
+    assert(rec.status == events::OrderStatus::PartiallyFilled); // Preserves PartiallyFilled
+    assert(rec.original_qty == 100);
+    assert(rec.remaining_qty == 50);
+    assert(rec.filled_qty == 30); // Preserves 30 shares filled
+
+    // 4. Cancel the remaining 50 shares
+    events::OutboundEvent e4;
+    e4.type = events::OutboundEventType::OrderState;
+    e4.order.order_id = 888;
+    e4.order.client_order_id = 9991;
+    e4.order.instrument_id = 0;
+    e4.order.side = Side::Buy;
+    e4.order.price = 150;
+    e4.order.original_qty = 50;
+    e4.order.remaining_qty = 0;
+    e4.order.filled_qty = 0;
+    e4.order.status = events::OrderStatus::Cancelled;
+    e4.order.sequence = 4;
+    model.applyEvent(e4);
+
+    assert(model.getOrderByClientId(9991, rec));
+    assert(rec.status == events::OrderStatus::Cancelled);
+    assert(rec.original_qty == 100);
+    assert(rec.remaining_qty == 0);
+    assert(rec.filled_qty == 30); // Cumulative filled is 30, NOT 100!
+}
+
 int main() {
     std::cout << "\n===== Read Model & Projector Test Suite =====\n\n";
 
@@ -909,6 +994,7 @@ int main() {
     RUN_TEST(test_read_model_multi_instrument_concurrent_queries);
     RUN_TEST(test_bounded_trade_history_zero_and_boundary_capacities);
     RUN_TEST(test_read_model_multi_fill_cumulative_quantity_and_client_order_id_preservation);
+    RUN_TEST(test_read_model_cancel_and_modify_after_partial_fill);
 
     std::cout << "\n=============================================\n";
     std::cout << "Results: " << passed << " passed, 0 failed\n\n";

@@ -179,7 +179,7 @@ void TcpGateway::closeClient(int fd) {
 static bool send_all_socket(int fd, const uint8_t* data, size_t size) {
     size_t total_sent = 0;
     int retries = 0;
-    constexpr int MAX_SEND_RETRIES = 10000;
+    constexpr int MAX_SEND_RETRIES = 500;
     while (total_sent < size) {
         ssize_t n = send(fd, data + total_sent, size - total_sent, 0);
         if (n > 0) {
@@ -202,30 +202,34 @@ static bool send_all_socket(int fd, const uint8_t* data, size_t size) {
     return true;
 }
 
-void TcpGateway::handleSession(int fd, const SessionFrame& session) {
+bool TcpGateway::handleSession(int fd, const SessionFrame& session) {
     if (session.type == wire::MessageType::Ping) {
         auto resp = wire::encode_pong(session.nonce);
-        send_all_socket(fd, resp.data(), resp.size());
+        if (!send_all_socket(fd, resp.data(), resp.size())) {
+            return false;
+        }
     }
     stats.session_frames_processed++;
+    return true;
 }
 
-void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
-    if (!read_model) return;
+bool TcpGateway::handleQuery(int fd, const QueryFrame& query) {
+    if (!read_model) return true;
 
+    bool ok = true;
     switch (query.type) {
         case wire::MessageType::QueryBook: {
             L2BookState book;
             read_model->getL2Book(query.instrument_id, book);
             auto resp = wire::encode_query_book_response(book);
-            send_all_socket(fd, resp.data(), resp.size());
+            ok = send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         case wire::MessageType::QueryTrades: {
             std::vector<TradeRecord> trades;
             read_model->getRecentTrades(query.instrument_id, query.limit, trades);
             auto resp = wire::encode_query_trades_response(query.instrument_id, trades);
-            send_all_socket(fd, resp.data(), resp.size());
+            ok = send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         case wire::MessageType::QueryOrder: {
@@ -237,19 +241,20 @@ void TcpGateway::handleQuery(int fd, const QueryFrame& query) {
                 found = read_model->getOrder(query.order_id, order);
             }
             auto resp = wire::encode_query_order_response(found, order);
-            send_all_socket(fd, resp.data(), resp.size());
+            ok = send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         case wire::MessageType::QueryStats: {
             EngineMetrics metrics;
             read_model->getMetrics(metrics);
             auto resp = wire::encode_query_stats_response(metrics);
-            send_all_socket(fd, resp.data(), resp.size());
+            ok = send_all_socket(fd, resp.data(), resp.size());
             break;
         }
         default:
             break;
     }
+    return ok;
 }
 
 void TcpGateway::runGateway() {
@@ -361,7 +366,10 @@ void TcpGateway::runGateway() {
 
                                 if (status == ParseStatus::Ok) {
                                     if (frame.category == FrameCategory::Session) {
-                                        handleSession(fd, frame.session);
+                                        if (!handleSession(fd, frame.session)) {
+                                            should_close = true;
+                                            break;
+                                        }
                                     } else if (frame.category == FrameCategory::Command) {
                                         frame.command.client_fd = fd;
                                         // Push to SPSC Queue with bounded backpressure retries
@@ -385,7 +393,10 @@ void TcpGateway::runGateway() {
                                             stats.events_pushed++;
                                         }
                                     } else if (frame.category == FrameCategory::Query) {
-                                        handleQuery(fd, frame.query);
+                                        if (!handleQuery(fd, frame.query)) {
+                                            should_close = true;
+                                            break;
+                                        }
                                         stats.queries_processed++;
                                     }
                                 } else if (status == ParseStatus::NeedMoreData) {
